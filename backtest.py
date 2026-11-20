@@ -1,6 +1,6 @@
 """
-backtest.py — Multi-Asset Dual-Engine Portfolio Backtest, Alpha Growth Trailing Stop Engine,
-Parameter Heatmap, and Walk-Forward Optimization (WFO) for Maddy AI.
+backtest.py — Multi-Asset Dual-Engine Portfolio Backtest, High Win-Rate Pullback Engine,
+Alpha Growth Trailing Stop Engine, Parameter Heatmap, and Walk-Forward Optimization (WFO).
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ def _precompute_smc_flags(df: pd.DataFrame) -> pd.DataFrame:
     if out.empty:
         return out
 
+    out = out[~out.index.duplicated(keep="last")].sort_index()
     highs = out["High"].to_numpy(dtype=float)
     lows = out["Low"].to_numpy(dtype=float)
     opens = out["Open"].to_numpy(dtype=float)
@@ -57,6 +58,7 @@ def _precompute_smc_flags(df: pd.DataFrame) -> pd.DataFrame:
 
     out["SMC_FVG_Hit"] = fvg_support
     out["SMC_Breakaway_Gap"] = breakaway_gap
+    out["PrevClose"] = out["Close"].shift(1)
     return out
 
 
@@ -64,28 +66,35 @@ def run_portfolio_backtest(
     stock_data: Dict[str, pd.DataFrame],
     nifty_df: pd.DataFrame,
     initial_capital: float = 100_000.0,
-    sl_mult: float = 1.5,
-    tp_mult: float = 3.5,
+    sl_mult: float = 1.8,
+    tp_mult: float = 2.4,
     slippage_pct: float = 0.0010,
     commission_pct: float = 0.0005,
     stale_signal_bars: int = 3,
-    strategy_mode: str = "Alpha Growth (Trail + RS Leaders)",
+    strategy_mode: str = "High Win-Rate (Pullback + Partial Lock)",
     risk_config: RiskConfig = RiskConfig(),
 ) -> Dict[str, Any]:
     """
-    Run multi-asset portfolio backtest.
-    Modes:
-      - 'Balanced (Fixed TP)': Standard EMA + SMC fixed SL/TP.
-      - 'Alpha Growth (Trail + RS Leaders)':
-          * Only buys RS Leaders outperforming Nifty 50 + healthy RSI (48-70)
-          * Moves Stop-Loss to Breakeven at +1.5R
-          * Trails Stop-Loss with ATR Chandelier (2.0x ATR below highest high) to let big winners run!
+    Run multi-asset portfolio backtest across 3 white-box engine modes:
+      1. 'High Win-Rate (Pullback + Partial Lock)':
+           - Uptrend pullback entries (Close > EMA50, EMA20 > EMA50, RSI 38-60, green bounce candle)
+           - Wider noise-proof SL (max(sl_mult, 1.8) * ATR)
+           - Locks 50% partial profit at +1.0R and moves remaining 50% SL to Breakeven!
+      2. 'Alpha Growth (Trail + RS Leaders)':
+           - RS Leaders outperforming Nifty 50 + +1.5R Breakeven + 2x ATR Chandelier Trailing Stop
+      3. 'Balanced (Fixed TP)':
+           - Standard EMA + SMC fixed SL/TP baseline
     """
     if not stock_data or nifty_df is None or nifty_df.empty:
         return {"error": "Missing stock or Nifty 50 data."}
 
-    is_alpha_mode = "Alpha Growth" in strategy_mode
+    mode_str = str(strategy_mode)
+    is_winrate_mode = "High Win-Rate" in mode_str
+    is_alpha_mode = "Alpha Growth" in mode_str
+
     nifty = add_indicators(nifty_df)
+    nifty = nifty[~nifty.index.duplicated(keep="last")].sort_index()
+
     enriched: Dict[str, pd.DataFrame] = {}
     close_matrix: Dict[str, pd.Series] = {}
 
@@ -114,7 +123,7 @@ def run_portfolio_backtest(
         current_prices: Dict[str, float] = {}
         to_close: List[str] = []
 
-        # 1. Manage Open Positions (Trailing Stop / Breakeven / Fixed Target)
+        # 1. Manage Open Positions
         for ticker, pos in list(open_positions.items()):
             df_t = enriched[ticker]
             if dt not in df_t.index:
@@ -122,6 +131,9 @@ def run_portfolio_backtest(
                 continue
 
             row = df_t.loc[dt]
+            if isinstance(row, pd.DataFrame):
+                row = row.iloc[-1]
+
             low = safe_float(row["Low"])
             high = safe_float(row["High"])
             close = safe_float(row["Close"])
@@ -130,27 +142,56 @@ def run_portfolio_backtest(
             pos["last_price"] = close
             pos["highest_high"] = max(pos["highest_high"], high)
 
+            # High Win-Rate Partial Profit Lock at +1.0R (sells 50% & moves SL to Breakeven)
+            if is_winrate_mode and (not pos["partial_taken"]) and pos["qty"] >= 2:
+                partial_target = pos["entry"] + 1.0 * pos["init_risk"]
+                if high >= partial_target:
+                    sell_qty = pos["qty"] // 2
+                    rem_qty = pos["qty"] - sell_qty
+                    exec_px = partial_target * (1.0 - slippage_pct)
+                    gross = exec_px * sell_qty
+                    net = gross * (1.0 - commission_pct)
+                    cash += net
+
+                    part_cost = pos["cost_basis"] * (sell_qty / pos["qty"])
+                    part_pnl = net - part_cost
+                    pos["realized_partial_pnl"] += part_pnl
+                    pos["cost_basis"] -= part_cost
+                    pos["qty"] = rem_qty
+                    pos["partial_taken"] = True
+                    # Shift SL to Breakeven + buffer so remaining shares cannot turn trade red
+                    pos["stop_loss"] = max(pos["stop_loss"], pos["entry"] * (1.0 + slippage_pct + commission_pct))
+                    pos["trailed"] = True
+
             exit_price = None
             exit_reason = None
 
             if low <= pos["stop_loss"]:
                 exit_price = pos["stop_loss"] * (1.0 - slippage_pct)
-                exit_reason = "Trailing Stop" if pos["trailed"] else "Stop-Loss"
-            elif (not is_alpha_mode) and high >= pos["target"]:
+                if pos["partial_taken"]:
+                    exit_reason = "Partial + Breakeven"
+                elif pos["trailed"]:
+                    exit_reason = "Trailing Stop"
+                else:
+                    exit_reason = "Stop-Loss"
+            elif is_winrate_mode and high >= pos["target"] * 1.8:
+                exit_price = (pos["target"] * 1.8) * (1.0 - slippage_pct)
+                exit_reason = "Runner Target"
+            elif (not is_alpha_mode) and (not is_winrate_mode) and high >= pos["target"]:
                 exit_price = pos["target"] * (1.0 - slippage_pct)
                 exit_reason = "Target Hit"
             elif is_alpha_mode and high >= pos["target"] * 1.6:
-                # Blow-off profit lock at extended target
                 exit_price = (pos["target"] * 1.6) * (1.0 - slippage_pct)
                 exit_reason = "Extended Target"
 
             if exit_price is not None:
                 gross = exit_price * pos["qty"]
-                fee = gross * commission_pct
-                net = gross - fee
+                net = gross * (1.0 - commission_pct)
                 cash += net
-                pnl = net - pos["cost_basis"]
-                pnl_pct = (pnl / pos["cost_basis"] * 100.0) if pos["cost_basis"] > 0 else 0.0
+
+                total_pnl = (net - pos["cost_basis"]) + pos["realized_partial_pnl"]
+                orig_cost = pos["orig_cost_basis"]
+                pnl_pct = (total_pnl / orig_cost * 100.0) if orig_cost > 0 else 0.0
 
                 trade_log.append(
                     {
@@ -159,19 +200,18 @@ def run_portfolio_backtest(
                         "Setup": pos["setup"],
                         "EntryDate": pos["entry_date"].strftime("%Y-%m-%d"),
                         "ExitDate": dt.strftime("%Y-%m-%d"),
-                        "Qty": pos["qty"],
+                        "Qty": pos["orig_qty"],
                         "Entry": round(pos["entry"], 2),
                         "Exit": round(exit_price, 2),
-                        "PnL": round(pnl, 2),
+                        "PnL": round(total_pnl, 2),
                         "Return%": round(pnl_pct, 2),
                         "Reason": exit_reason,
                     }
                 )
                 to_close.append(ticker)
-            elif is_alpha_mode:
-                # Breakeven shift at +1.5R + ATR Chandelier Trailing Stop
+            elif is_alpha_mode or (is_winrate_mode and pos["partial_taken"]):
                 init_risk = pos["init_risk"]
-                if init_risk > 0 and (pos["highest_high"] - pos["entry"]) >= 1.5 * init_risk:
+                if init_risk > 0 and (pos["highest_high"] - pos["entry"]) >= 1.25 * init_risk:
                     be_stop = pos["entry"] * (1.0 + slippage_pct + commission_pct)
                     chandelier = pos["highest_high"] - 2.0 * atr_now
                     new_sl = max(pos["stop_loss"], be_stop, chandelier)
@@ -196,13 +236,15 @@ def run_portfolio_backtest(
 
         # 3. Macro Regime Check on Nifty 50
         n_row = nifty.loc[dt]
+        if isinstance(n_row, pd.DataFrame):
+            n_row = n_row.iloc[-1]
         nifty_roc20 = safe_float(n_row["ROC20"])
         nifty_bullish = (
             safe_float(n_row["Close"]) > safe_float(n_row["EMA20"])
             and safe_float(n_row["EMA20"]) >= safe_float(n_row["EMA50"])
         )
 
-        # 4. Dual-Engine Entry Scan (sorted by Relative Strength so best leaders get capital first)
+        # 4. Entry Scan
         if nifty_bullish:
             returns_slice = returns_df.loc[:dt]
             candidates = []
@@ -210,7 +252,13 @@ def run_portfolio_backtest(
                 if ticker in open_positions or dt not in df_t.index:
                     continue
                 row = df_t.loc[dt]
+                if isinstance(row, pd.DataFrame):
+                    row = row.iloc[-1]
+
+                open_p = safe_float(row["Open"])
                 close = safe_float(row["Close"])
+                low = safe_float(row["Low"])
+                prev_c = safe_float(row["PrevClose"], default=close)
                 ema20 = safe_float(row["EMA20"])
                 ema50 = safe_float(row["EMA50"])
                 atr14 = safe_float(row["ATR14"])
@@ -222,40 +270,48 @@ def run_portfolio_backtest(
                 gap_hit = bool(row["SMC_Breakaway_Gap"])
 
                 dist_pct = ((close - ema20) / ema20 * 100.0) if ema20 > 0 else 99.0
-                trend_ok = close > ema20 and ema20 > ema50 and atr14 > 0 and 0.8 <= atr_pct <= 4.5
                 smc_boost = fvg_hit or gap_hit
 
-                if is_alpha_mode:
-                    # Stricter Alpha Growth filter: must outperform Nifty 50 & healthy RSI
+                if is_winrate_mode:
+                    # High Win-Rate + Alpha Hybrid: RS Leader uptrend + pullback/value + green bounce
+                    uptrend = close > ema50 and ema20 > ema50 and rs_vs_nifty > 0.0 and atr14 > 0 and 0.6 <= atr_pct <= 4.5
+                    near_value = (-1.5 <= dist_pct <= 3.5) or (low <= ema20 * 1.015 and close >= ema20) or smc_boost
+                    green_bounce = close > open_p and close > prev_c
+                    healthy_rsi = 42.0 <= rsi14 <= 68.0
+                    if not (uptrend and near_value and green_bounce and healthy_rsi):
+                        continue
+                elif is_alpha_mode:
+                    trend_ok = close > ema20 and ema20 > ema50 and atr14 > 0 and 0.8 <= atr_pct <= 4.5
                     if not (trend_ok and rs_vs_nifty > 0.0 and 48.0 <= rsi14 <= 72.0 and (dist_pct <= 4.0 or smc_boost)):
                         continue
                 else:
+                    trend_ok = close > ema20 and ema20 > ema50 and atr14 > 0 and 0.8 <= atr_pct <= 4.5
                     if not (trend_ok and (dist_pct <= 3.0 or smc_boost)):
                         continue
 
                 candidates.append((rs_vs_nifty, ticker, close, atr14, fvg_hit, gap_hit))
 
-            # Prioritize strongest Relative Strength leaders first
             candidates.sort(key=lambda x: x[0], reverse=True)
 
             for rs_val, ticker, close, atr14, fvg_hit, gap_hit in candidates:
-                setup_label = "RS Leader + EMA" if is_alpha_mode else "EMA Trend"
-                if fvg_hit and gap_hit:
-                    setup_label = "A+ FVG 50% + Gap"
-                elif fvg_hit:
-                    setup_label = "Bullish FVG 50%"
-                elif gap_hit:
-                    setup_label = "Breakaway Gap"
+                if is_winrate_mode:
+                    setup_label = "Pullback + FVG 50%" if fvg_hit else "EMA20 Pullback Bounce"
+                elif is_alpha_mode:
+                    setup_label = "A+ FVG/Gap Leader" if (fvg_hit or gap_hit) else "RS Leader + EMA"
+                else:
+                    setup_label = "EMA + SMC" if (fvg_hit or gap_hit) else "EMA Trend"
 
                 pending_signals[ticker] = {"bar_idx": bar_idx, "setup": setup_label}
 
                 entry_exec = close * (1.0 + slippage_pct)
-                stop_loss = max(0.05, entry_exec - sl_mult * atr14)
-                target = entry_exec + tp_mult * atr14
+                eff_sl_mult = max(sl_mult, 1.8) if is_winrate_mode else sl_mult
+                eff_tp_mult = min(tp_mult, 2.4) if is_winrate_mode else tp_mult
 
-                # Dynamic conviction sizing: A+ SMC leaders get 1.5% risk (still capped by 5% heat)
+                stop_loss = max(0.05, entry_exec - eff_sl_mult * atr14)
+                target = entry_exec + eff_tp_mult * atr14
+
                 eff_cfg = RiskConfig(
-                    risk_per_trade_pct=0.015 if (is_alpha_mode and (fvg_hit or gap_hit)) else risk_config.risk_per_trade_pct,
+                    risk_per_trade_pct=0.015 if ((is_alpha_mode or is_winrate_mode) and (fvg_hit or gap_hit)) else risk_config.risk_per_trade_pct,
                     max_stock_alloc_pct=risk_config.max_stock_alloc_pct,
                     max_sector_alloc_pct=risk_config.max_sector_alloc_pct,
                     max_portfolio_heat_pct=risk_config.max_portfolio_heat_pct,
@@ -312,9 +368,13 @@ def run_portfolio_backtest(
                     "atr_entry": atr14,
                     "highest_high": close,
                     "trailed": False,
+                    "partial_taken": False,
+                    "realized_partial_pnl": 0.0,
                     "target": target,
                     "qty": qty,
+                    "orig_qty": qty,
                     "cost_basis": total_cost,
+                    "orig_cost_basis": total_cost,
                     "sector": get_sector(ticker),
                     "setup": setup_label,
                     "last_price": close,
@@ -396,13 +456,13 @@ def run_parameter_heatmap(
     stock_data: Dict[str, pd.DataFrame],
     nifty_df: pd.DataFrame,
     initial_capital: float = 100_000.0,
-    strategy_mode: str = "Alpha Growth (Trail + RS Leaders)",
+    strategy_mode: str = "High Win-Rate (Pullback + Partial Lock)",
     sl_grid: List[float] = None,
     tp_grid: List[float] = None,
 ) -> pd.DataFrame:
     """Evaluate Net Return % across a grid of SL x TP ATR multipliers."""
-    sl_vals = sl_grid or [1.2, 1.5, 2.0, 2.5]
-    tp_vals = tp_grid or [2.5, 3.0, 3.5, 4.5]
+    sl_vals = sl_grid or [1.5, 1.8, 2.0, 2.5]
+    tp_vals = tp_grid or [2.0, 2.4, 3.0, 4.0]
 
     matrix = pd.DataFrame(index=[f"SL {s:.1f}x" for s in sl_vals], columns=[f"TP {t:.1f}x" for t in tp_vals], dtype=float)
     for s in sl_vals:
@@ -424,7 +484,7 @@ def run_walk_forward_validation(
     stock_data: Dict[str, pd.DataFrame],
     nifty_df: pd.DataFrame,
     initial_capital: float = 100_000.0,
-    strategy_mode: str = "Alpha Growth (Trail + RS Leaders)",
+    strategy_mode: str = "High Win-Rate (Pullback + Partial Lock)",
     n_splits: int = 3,
 ) -> pd.DataFrame:
     """Rolling Walk-Forward Optimization (In-Sample -> Unseen Out-of-Sample)."""
@@ -436,7 +496,7 @@ def run_walk_forward_validation(
     if chunk < 65:
         return pd.DataFrame()
 
-    candidate_pairs = [(1.2, 3.0), (1.5, 3.5), (2.0, 4.0), (2.0, 4.5)]
+    candidate_pairs = [(1.5, 2.4), (1.8, 2.4), (2.0, 3.0), (2.0, 4.0)]
     rows: List[Dict[str, Any]] = []
 
     for split in range(n_splits):
@@ -454,7 +514,7 @@ def run_walk_forward_validation(
         is_stocks = {t: df.loc[df.index.intersection(is_dates)] for t, df in stock_data.items()}
         oos_stocks = {t: df.loc[df.index.intersection(oos_dates)] for t, df in stock_data.items()}
 
-        best_pair = (1.5, 3.5)
+        best_pair = (1.8, 2.4)
         best_is_ret = -999.0
         for sl_m, tp_m in candidate_pairs:
             res_is = run_portfolio_backtest(

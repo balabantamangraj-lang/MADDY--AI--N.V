@@ -185,7 +185,7 @@ with st.sidebar:
     )
     strategy_mode = st.selectbox(
         "Strategy Engine Mode",
-        ["Alpha Growth (Trail + RS Leaders)", "Balanced (Fixed TP)"],
+        ["High Win-Rate (Pullback + Partial Lock)", "Alpha Growth (Trail + RS Leaders)", "Balanced (Fixed TP)"],
         index=0,
         help="Alpha Growth filters for Nifty-outperforming RS Leaders, shifts SL to breakeven at +1.5R, and trails winners with a 2x ATR Chandelier stop.",
     )

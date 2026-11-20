@@ -110,6 +110,7 @@ def _clean_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
 
     out = out.dropna(subset=["Open", "High", "Low", "Close"])
     out.index = pd.to_datetime(out.index).tz_localize(None)
+    out = out[~out.index.duplicated(keep="last")]
     return out.sort_index()
 
 
