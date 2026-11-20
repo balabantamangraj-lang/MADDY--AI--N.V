@@ -1,13 +1,6 @@
 """
-backtest.py — Multi-Asset Dual-Engine Portfolio Backtest, Parameter Heatmap,
-and Walk-Forward Optimization (WFO) engine for Maddy AI.
-Features:
-  - Realistic slippage (0.10%) and brokerage/commission (0.05%)
-  - Stale signal expiry (pending setups expire after max_signal_age bars)
-  - Full Trade Log + Institutional Risk Gate Rejection Ledger
-  - CAPM Alpha & Beta vs Nifty 50 Benchmark
-  - Parameter Stability Heatmap (SL vs TP ATR multipliers)
-  - Rolling Walk-Forward Optimization (In-Sample -> Out-of-Sample)
+backtest.py — Multi-Asset Dual-Engine Portfolio Backtest, Alpha Growth Trailing Stop Engine,
+Parameter Heatmap, and Walk-Forward Optimization (WFO) for Maddy AI.
 """
 
 from __future__ import annotations
@@ -22,7 +15,7 @@ from scanner import add_indicators
 
 
 def _precompute_smc_flags(df: pd.DataFrame) -> pd.DataFrame:
-    """Vectorized / fast bar-by-bar Bullish FVG & Breakaway Gap flags for backtesting."""
+    """Fast bar-by-bar Bullish FVG & Breakaway Gap flags for backtesting."""
     out = add_indicators(df)
     if out.empty:
         return out
@@ -37,18 +30,15 @@ def _precompute_smc_flags(df: pd.DataFrame) -> pd.DataFrame:
 
     fvg_support = np.zeros(n, dtype=bool)
     breakaway_gap = np.zeros(n, dtype=bool)
-
-    active_fvgs: List[Tuple[float, float, float, int]] = []  # (bottom, top, mid, born_idx)
+    active_fvgs: List[Tuple[float, float, float, int]] = []
 
     for i in range(2, n):
-        # Detect new Bullish FVG at bar i
         if lows[i] > highs[i - 2] and closes[i - 1] > 0:
             if (lows[i] - highs[i - 2]) / closes[i - 1] >= 0.002:
                 b = highs[i - 2]
                 t = lows[i]
                 active_fvgs.append((b, t, (b + t) / 2.0, i))
 
-        # Check fresh FVG 50% mitigation or near support (max 25 bars old)
         still_active = []
         for b, t, mid, born in active_fvgs:
             if i - born > 25 or lows[i] <= b:
@@ -58,7 +48,6 @@ def _precompute_smc_flags(df: pd.DataFrame) -> pd.DataFrame:
             still_active.append((b, t, mid, born))
         active_fvgs = still_active[-5:]
 
-        # Breakaway Gap Up detection
         prev_c = closes[i - 1]
         if prev_c > 0:
             gp = (opens[i] - prev_c) / prev_c
@@ -76,16 +65,26 @@ def run_portfolio_backtest(
     nifty_df: pd.DataFrame,
     initial_capital: float = 100_000.0,
     sl_mult: float = 1.5,
-    tp_mult: float = 3.0,
+    tp_mult: float = 3.5,
     slippage_pct: float = 0.0010,
     commission_pct: float = 0.0005,
     stale_signal_bars: int = 3,
+    strategy_mode: str = "Alpha Growth (Trail + RS Leaders)",
     risk_config: RiskConfig = RiskConfig(),
 ) -> Dict[str, Any]:
-    """Run multi-asset portfolio backtest with slippage, fees, stale signal expiry, and audit trail."""
+    """
+    Run multi-asset portfolio backtest.
+    Modes:
+      - 'Balanced (Fixed TP)': Standard EMA + SMC fixed SL/TP.
+      - 'Alpha Growth (Trail + RS Leaders)':
+          * Only buys RS Leaders outperforming Nifty 50 + healthy RSI (48-70)
+          * Moves Stop-Loss to Breakeven at +1.5R
+          * Trails Stop-Loss with ATR Chandelier (2.0x ATR below highest high) to let big winners run!
+    """
     if not stock_data or nifty_df is None or nifty_df.empty:
         return {"error": "Missing stock or Nifty 50 data."}
 
+    is_alpha_mode = "Alpha Growth" in strategy_mode
     nifty = add_indicators(nifty_df)
     enriched: Dict[str, pd.DataFrame] = {}
     close_matrix: Dict[str, pd.Series] = {}
@@ -105,7 +104,7 @@ def run_portfolio_backtest(
     cash = float(initial_capital)
     peak_equity = float(initial_capital)
     open_positions: Dict[str, dict] = {}
-    pending_signals: Dict[str, dict] = {}  # Stale signal expiry tracker
+    pending_signals: Dict[str, dict] = {}
 
     equity_records: List[Dict[str, Any]] = []
     trade_log: List[Dict[str, Any]] = []
@@ -115,7 +114,7 @@ def run_portfolio_backtest(
         current_prices: Dict[str, float] = {}
         to_close: List[str] = []
 
-        # 1. Manage Open Positions (Stop-Loss / Target)
+        # 1. Manage Open Positions (Trailing Stop / Breakeven / Fixed Target)
         for ticker, pos in list(open_positions.items()):
             df_t = enriched[ticker]
             if dt not in df_t.index:
@@ -126,18 +125,24 @@ def run_portfolio_backtest(
             low = safe_float(row["Low"])
             high = safe_float(row["High"])
             close = safe_float(row["Close"])
+            atr_now = safe_float(row["ATR14"], default=pos["atr_entry"])
             current_prices[ticker] = close
             pos["last_price"] = close
+            pos["highest_high"] = max(pos["highest_high"], high)
 
             exit_price = None
             exit_reason = None
 
             if low <= pos["stop_loss"]:
                 exit_price = pos["stop_loss"] * (1.0 - slippage_pct)
-                exit_reason = "Stop-Loss"
-            elif high >= pos["target"]:
+                exit_reason = "Trailing Stop" if pos["trailed"] else "Stop-Loss"
+            elif (not is_alpha_mode) and high >= pos["target"]:
                 exit_price = pos["target"] * (1.0 - slippage_pct)
                 exit_reason = "Target Hit"
+            elif is_alpha_mode and high >= pos["target"] * 1.6:
+                # Blow-off profit lock at extended target
+                exit_price = (pos["target"] * 1.6) * (1.0 - slippage_pct)
+                exit_reason = "Extended Target"
 
             if exit_price is not None:
                 gross = exit_price * pos["qty"]
@@ -163,6 +168,16 @@ def run_portfolio_backtest(
                     }
                 )
                 to_close.append(ticker)
+            elif is_alpha_mode:
+                # Breakeven shift at +1.5R + ATR Chandelier Trailing Stop
+                init_risk = pos["init_risk"]
+                if init_risk > 0 and (pos["highest_high"] - pos["entry"]) >= 1.5 * init_risk:
+                    be_stop = pos["entry"] * (1.0 + slippage_pct + commission_pct)
+                    chandelier = pos["highest_high"] - 2.0 * atr_now
+                    new_sl = max(pos["stop_loss"], be_stop, chandelier)
+                    if new_sl > pos["stop_loss"]:
+                        pos["stop_loss"] = new_sl
+                        pos["trailed"] = True
 
         for ticker in to_close:
             open_positions.pop(ticker, None)
@@ -181,24 +196,28 @@ def run_portfolio_backtest(
 
         # 3. Macro Regime Check on Nifty 50
         n_row = nifty.loc[dt]
+        nifty_roc20 = safe_float(n_row["ROC20"])
         nifty_bullish = (
             safe_float(n_row["Close"]) > safe_float(n_row["EMA20"])
             and safe_float(n_row["EMA20"]) >= safe_float(n_row["EMA50"])
         )
 
-        # 4. Dual-Engine Entry Scan
+        # 4. Dual-Engine Entry Scan (sorted by Relative Strength so best leaders get capital first)
         if nifty_bullish:
             returns_slice = returns_df.loc[:dt]
+            candidates = []
             for ticker, df_t in enriched.items():
                 if ticker in open_positions or dt not in df_t.index:
                     continue
-
                 row = df_t.loc[dt]
                 close = safe_float(row["Close"])
                 ema20 = safe_float(row["EMA20"])
                 ema50 = safe_float(row["EMA50"])
                 atr14 = safe_float(row["ATR14"])
                 atr_pct = safe_float(row["ATR_Pct"])
+                rsi14 = safe_float(row["RSI14"], default=50.0)
+                roc20 = safe_float(row["ROC20"])
+                rs_vs_nifty = roc20 - nifty_roc20
                 fvg_hit = bool(row["SMC_FVG_Hit"])
                 gap_hit = bool(row["SMC_Breakaway_Gap"])
 
@@ -206,22 +225,43 @@ def run_portfolio_backtest(
                 trend_ok = close > ema20 and ema20 > ema50 and atr14 > 0 and 0.8 <= atr_pct <= 4.5
                 smc_boost = fvg_hit or gap_hit
 
-                if not (trend_ok and (dist_pct <= 3.0 or smc_boost)):
-                    continue
+                if is_alpha_mode:
+                    # Stricter Alpha Growth filter: must outperform Nifty 50 & healthy RSI
+                    if not (trend_ok and rs_vs_nifty > 0.0 and 48.0 <= rsi14 <= 72.0 and (dist_pct <= 4.0 or smc_boost)):
+                        continue
+                else:
+                    if not (trend_ok and (dist_pct <= 3.0 or smc_boost)):
+                        continue
 
-                setup_label = "EMA Trend"
+                candidates.append((rs_vs_nifty, ticker, close, atr14, fvg_hit, gap_hit))
+
+            # Prioritize strongest Relative Strength leaders first
+            candidates.sort(key=lambda x: x[0], reverse=True)
+
+            for rs_val, ticker, close, atr14, fvg_hit, gap_hit in candidates:
+                setup_label = "RS Leader + EMA" if is_alpha_mode else "EMA Trend"
                 if fvg_hit and gap_hit:
-                    setup_label = "EMA + FVG 50% + Gap"
+                    setup_label = "A+ FVG 50% + Gap"
                 elif fvg_hit:
-                    setup_label = "EMA + Bullish FVG 50%"
+                    setup_label = "Bullish FVG 50%"
                 elif gap_hit:
-                    setup_label = "EMA + Breakaway Gap"
+                    setup_label = "Breakaway Gap"
 
                 pending_signals[ticker] = {"bar_idx": bar_idx, "setup": setup_label}
 
                 entry_exec = close * (1.0 + slippage_pct)
                 stop_loss = max(0.05, entry_exec - sl_mult * atr14)
                 target = entry_exec + tp_mult * atr14
+
+                # Dynamic conviction sizing: A+ SMC leaders get 1.5% risk (still capped by 5% heat)
+                eff_cfg = RiskConfig(
+                    risk_per_trade_pct=0.015 if (is_alpha_mode and (fvg_hit or gap_hit)) else risk_config.risk_per_trade_pct,
+                    max_stock_alloc_pct=risk_config.max_stock_alloc_pct,
+                    max_sector_alloc_pct=risk_config.max_sector_alloc_pct,
+                    max_portfolio_heat_pct=risk_config.max_portfolio_heat_pct,
+                    max_correlation=risk_config.max_correlation,
+                    kill_switch_dd_pct=risk_config.kill_switch_dd_pct,
+                )
 
                 approved, qty, reason = evaluate_trade_gate(
                     ticker=ticker,
@@ -232,7 +272,7 @@ def run_portfolio_backtest(
                     open_positions=open_positions,
                     returns_df=returns_slice,
                     current_prices=current_prices,
-                    config=risk_config,
+                    config=eff_cfg,
                 )
 
                 if not approved:
@@ -268,6 +308,10 @@ def run_portfolio_backtest(
                     "entry_date": dt,
                     "entry": entry_exec,
                     "stop_loss": stop_loss,
+                    "init_risk": max(0.01, entry_exec - stop_loss),
+                    "atr_entry": atr14,
+                    "highest_high": close,
+                    "trailed": False,
                     "target": target,
                     "qty": qty,
                     "cost_basis": total_cost,
@@ -313,7 +357,6 @@ def run_portfolio_backtest(
         win_rate = 0.0
         profit_factor = 0.0
 
-    # CAPM Alpha & Beta (6% India risk-free rate)
     port_ret = eq_df["Equity"].pct_change().dropna()
     bench_ret = eq_df["NiftyClose"].pct_change().dropna()
     aligned = pd.concat([port_ret, bench_ret], axis=1).dropna()
@@ -353,12 +396,13 @@ def run_parameter_heatmap(
     stock_data: Dict[str, pd.DataFrame],
     nifty_df: pd.DataFrame,
     initial_capital: float = 100_000.0,
+    strategy_mode: str = "Alpha Growth (Trail + RS Leaders)",
     sl_grid: List[float] = None,
     tp_grid: List[float] = None,
 ) -> pd.DataFrame:
-    """Evaluate Net Return % across a grid of SL x TP ATR multipliers for stability validation."""
+    """Evaluate Net Return % across a grid of SL x TP ATR multipliers."""
     sl_vals = sl_grid or [1.2, 1.5, 2.0, 2.5]
-    tp_vals = tp_grid or [2.0, 2.5, 3.0, 4.0]
+    tp_vals = tp_grid or [2.5, 3.0, 3.5, 4.5]
 
     matrix = pd.DataFrame(index=[f"SL {s:.1f}x" for s in sl_vals], columns=[f"TP {t:.1f}x" for t in tp_vals], dtype=float)
     for s in sl_vals:
@@ -369,6 +413,7 @@ def run_parameter_heatmap(
                 initial_capital=initial_capital,
                 sl_mult=s,
                 tp_mult=t,
+                strategy_mode=strategy_mode,
             )
             ret = res["metrics"]["NetReturn%"] if "metrics" in res else 0.0
             matrix.loc[f"SL {s:.1f}x", f"TP {t:.1f}x"] = round(float(ret), 2)
@@ -379,13 +424,10 @@ def run_walk_forward_validation(
     stock_data: Dict[str, pd.DataFrame],
     nifty_df: pd.DataFrame,
     initial_capital: float = 100_000.0,
+    strategy_mode: str = "Alpha Growth (Trail + RS Leaders)",
     n_splits: int = 3,
 ) -> pd.DataFrame:
-    """
-    Walk-Forward Optimization (WFO):
-      - For each rolling window, pick best (SL, TP) on In-Sample (IS) slice,
-        then evaluate those exact parameters on unseen Out-of-Sample (OOS) slice.
-    """
+    """Rolling Walk-Forward Optimization (In-Sample -> Unseen Out-of-Sample)."""
     if nifty_df is None or len(nifty_df) < 180:
         return pd.DataFrame()
 
@@ -394,7 +436,7 @@ def run_walk_forward_validation(
     if chunk < 65:
         return pd.DataFrame()
 
-    candidate_pairs = [(1.2, 2.5), (1.5, 3.0), (2.0, 3.5), (2.0, 4.0)]
+    candidate_pairs = [(1.2, 3.0), (1.5, 3.5), (2.0, 4.0), (2.0, 4.5)]
     rows: List[Dict[str, Any]] = []
 
     for split in range(n_splits):
@@ -412,20 +454,20 @@ def run_walk_forward_validation(
         is_stocks = {t: df.loc[df.index.intersection(is_dates)] for t, df in stock_data.items()}
         oos_stocks = {t: df.loc[df.index.intersection(oos_dates)] for t, df in stock_data.items()}
 
-        best_pair = (1.5, 3.0)
+        best_pair = (1.5, 3.5)
         best_is_ret = -999.0
         for sl_m, tp_m in candidate_pairs:
-            res_is = run_portfolio_backtest(is_stocks, is_nifty, initial_capital=initial_capital, sl_mult=sl_m, tp_mult=tp_m)
+            res_is = run_portfolio_backtest(
+                is_stocks, is_nifty, initial_capital=initial_capital,
+                sl_mult=sl_m, tp_mult=tp_m, strategy_mode=strategy_mode,
+            )
             if "metrics" in res_is and res_is["metrics"]["NetReturn%"] > best_is_ret:
                 best_is_ret = res_is["metrics"]["NetReturn%"]
                 best_pair = (sl_m, tp_m)
 
         res_oos = run_portfolio_backtest(
-            oos_stocks,
-            oos_nifty,
-            initial_capital=initial_capital,
-            sl_mult=best_pair[0],
-            tp_mult=best_pair[1],
+            oos_stocks, oos_nifty, initial_capital=initial_capital,
+            sl_mult=best_pair[0], tp_mult=best_pair[1], strategy_mode=strategy_mode,
         )
         oos_m = res_oos.get("metrics", {})
 

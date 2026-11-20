@@ -183,8 +183,14 @@ with st.sidebar:
         value=100_000,
         step=10_000,
     )
+    strategy_mode = st.selectbox(
+        "Strategy Engine Mode",
+        ["Alpha Growth (Trail + RS Leaders)", "Balanced (Fixed TP)"],
+        index=0,
+        help="Alpha Growth filters for Nifty-outperforming RS Leaders, shifts SL to breakeven at +1.5R, and trails winners with a 2x ATR Chandelier stop.",
+    )
     sl_mult = st.slider("Stop-Loss ATR Multiplier", 1.0, 3.0, 1.5, 0.1)
-    tp_mult = st.slider("Take-Profit ATR Multiplier", 1.5, 6.0, 3.0, 0.25)
+    tp_mult = st.slider("Take-Profit ATR Multiplier", 1.5, 6.0, 3.5, 0.25)
     period = st.selectbox("Backtest Window", ["1y", "2y", "3y"], index=1)
 
     watchlist_text = st.text_area(
@@ -232,6 +238,7 @@ bt_results = run_portfolio_backtest(
     initial_capital=float(capital),
     sl_mult=sl_mult,
     tp_mult=tp_mult,
+    strategy_mode=strategy_mode,
     risk_config=risk_cfg,
 )
 
@@ -266,6 +273,7 @@ with tab1:
         sl_mult=sl_mult,
         tp_mult=tp_mult,
         regime_bullish=regime["is_bullish"],
+        nifty_roc20=regime.get("roc20", 0.0),
     )
 
     if not scan_df.empty:
@@ -558,8 +566,8 @@ with tab4:
     st.subheader("2. Parameter Stability Heatmap & Walk-Forward Optimization (WFO)")
     if st.button("Run Heatmap + Walk-Forward Validation", type="primary"):
         with st.spinner("Running SL x TP stability grid & WFO splits..."):
-            hm_df = run_parameter_heatmap(stock_data, nifty_df, initial_capital=float(capital))
-            wfo_df = run_walk_forward_validation(stock_data, nifty_df, initial_capital=float(capital), n_splits=3)
+            hm_df = run_parameter_heatmap(stock_data, nifty_df, initial_capital=float(capital), strategy_mode=strategy_mode)
+            wfo_df = run_walk_forward_validation(stock_data, nifty_df, initial_capital=float(capital), strategy_mode=strategy_mode, n_splits=3)
 
         fig_hm = go.Figure(
             data=go.Heatmap(

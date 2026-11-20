@@ -1,18 +1,18 @@
 """
-scanner.py — Dual-Engine White-Box Strategy & SMC Scanner for Maddy AI.
+scanner.py — Dual-Engine White-Box Strategy & SMC Scanner for Maddy AI (Alpha Growth Upgrade).
 Implements:
-  - Technical Indicators: EMA20, EMA50, ATR14, ATR%, Volume MA20
+  - Technical Indicators: EMA20, EMA50, ATR14, ATR%, RSI14, Volume MA20
+  - Relative Strength (20D RS vs Nifty 50) — focuses on market leaders
   - Smart Money Concepts (SMC):
-      * 3-Candle Bullish & Bearish Fair Value Gap (FVG) detector
-      * 50% Midpoint calculation & fresh mitigation check
+      * 3-Candle Bullish & Bearish Fair Value Gap (FVG) detector + 50% midpoint mitigation
       * Common vs. Breakaway Market Gap detector (Gap Fill + Gap & Go)
   - Macro Filter: Nifty 50 Regime Banner
-  - Confluence Scoring System (0-100)
+  - Confluence Scoring System (0-100) with Conviction Grade (A+ / A / Watch)
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
@@ -20,7 +20,7 @@ from data_feed import get_sector, safe_float
 
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute EMA20, EMA50, ATR14, ATR%, and 20-day Volume MA cleanly."""
+    """Compute EMA20, EMA50, ATR14, ATR%, RSI14, and 20-day Volume MA cleanly."""
     if df is None or df.empty:
         return pd.DataFrame()
 
@@ -40,6 +40,16 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out["ATR14"] = true_range.rolling(window=14, min_periods=14).mean()
     out["ATR_Pct"] = np.where(close > 0, (out["ATR14"] / close) * 100.0, 0.0)
     out["Vol_MA20"] = out["Volume"].astype(float).rolling(window=20, min_periods=10).mean()
+
+    # RSI14 (Wilder smoothing via ewm)
+    delta = close.diff()
+    gain = delta.clip(lower=0.0)
+    loss = (-delta).clip(lower=0.0)
+    avg_gain = gain.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 100.0)
+    out["RSI14"] = 100.0 - (100.0 / (1.0 + rs))
+    out["ROC20"] = close.pct_change(20) * 100.0
     return out
 
 
@@ -48,12 +58,7 @@ def detect_fvg_zones(
     lookback: int = 80,
     min_gap_pct: float = 0.002,
 ) -> List[Dict[str, Any]]:
-    """
-    3-Candle Fair Value Gap (FVG) detector with 50% midpoint & mitigation tracking.
-      - Bullish FVG: Low[i] > High[i-2]
-      - Bearish FVG: High[i] < Low[i-2]
-    Tracks whether subsequent candles mitigated the 50% midpoint level.
-    """
+    """3-Candle Fair Value Gap (FVG) detector with 50% midpoint & mitigation tracking."""
     if df is None or len(df) < 5:
         return []
 
@@ -67,14 +72,12 @@ def detect_fvg_zones(
     n = len(sub)
 
     for i in range(2, n):
-        # Bullish FVG: candle[i].low > candle[i-2].high
         if lows[i] > highs[i - 2]:
             gap_size = lows[i] - highs[i - 2]
             if closes[i - 1] > 0 and (gap_size / closes[i - 1]) >= min_gap_pct:
                 bottom = float(highs[i - 2])
                 top = float(lows[i])
                 mid = (top + bottom) / 2.0
-
                 mitigated_50 = False
                 mitigated_full = False
                 mitigation_date = None
@@ -86,7 +89,6 @@ def detect_fvg_zones(
                     if lows[j] <= bottom:
                         mitigated_full = True
                         break
-
                 zones.append(
                     {
                         "type": "Bullish FVG",
@@ -101,15 +103,12 @@ def detect_fvg_zones(
                         "is_fresh": not mitigated_full,
                     }
                 )
-
-        # Bearish FVG: candle[i].high < candle[i-2].low
         elif highs[i] < lows[i - 2]:
             gap_size = lows[i - 2] - highs[i]
             if closes[i - 1] > 0 and (gap_size / closes[i - 1]) >= min_gap_pct:
                 bottom = float(highs[i])
                 top = float(lows[i - 2])
                 mid = (top + bottom) / 2.0
-
                 mitigated_50 = False
                 mitigated_full = False
                 mitigation_date = None
@@ -121,7 +120,6 @@ def detect_fvg_zones(
                     if highs[j] >= top:
                         mitigated_full = True
                         break
-
                 zones.append(
                     {
                         "type": "Bearish FVG",
@@ -145,11 +143,7 @@ def detect_market_gaps(
     lookback: int = 80,
     min_gap_pct: float = 0.010,
 ) -> List[Dict[str, Any]]:
-    """
-    Detect overnight Market Gaps (Gap Up / Gap Down) and classify them as:
-      - Breakaway Gap (Gap & Go): Volume >= 1.3x 20D avg AND closes in gap direction
-      - Common Gap (Gap Fill candidate): Lower volume or fades back toward prior close
-    """
+    """Detect Breakaway (Gap & Go) vs Common (Gap Fill) Market Gaps."""
     enriched = add_indicators(df) if "Vol_MA20" not in df.columns else df
     if enriched is None or len(enriched) < 5:
         return []
@@ -177,15 +171,10 @@ def detect_market_gaps(
         direction = "Gap Up" if gap_pct > 0 else "Gap Down"
         vol_ratio = vols[i] / vol_ma[i] if vol_ma[i] > 0 else 1.0
         followed_through = (closes[i] >= opens[i]) if gap_pct > 0 else (closes[i] <= opens[i])
-
-        if vol_ratio >= 1.3 and followed_through:
-            gap_class = "Breakaway Gap (Gap & Go)"
-        else:
-            gap_class = "Common Gap (Gap Fill)"
+        gap_class = "Breakaway Gap (Gap & Go)" if (vol_ratio >= 1.3 and followed_through) else "Common Gap (Gap Fill)"
 
         top = max(prev_c, opens[i])
         bottom = min(prev_c, opens[i])
-
         filled = False
         for j in range(i, n):
             if gap_pct > 0 and lows[j] <= prev_c:
@@ -222,12 +211,14 @@ def check_nifty_regime(nifty_df: pd.DataFrame) -> Dict[str, Any]:
             "close": 0.0,
             "ema20": 0.0,
             "ema50": 0.0,
+            "roc20": 0.0,
         }
 
     last = enriched.iloc[-1]
     close = safe_float(last["Close"])
     ema20 = safe_float(last["EMA20"])
     ema50 = safe_float(last["EMA50"])
+    roc20 = safe_float(last["ROC20"])
     is_bullish = bool(close > ema20 and ema20 >= ema50)
 
     return {
@@ -236,6 +227,7 @@ def check_nifty_regime(nifty_df: pd.DataFrame) -> Dict[str, Any]:
         "close": round(close, 2),
         "ema20": round(ema20, 2),
         "ema50": round(ema50, 2),
+        "roc20": round(roc20, 2),
     }
 
 
@@ -243,13 +235,14 @@ def score_stock_snapshot(
     ticker: str,
     df: pd.DataFrame,
     sl_mult: float = 1.5,
-    tp_mult: float = 3.0,
+    tp_mult: float = 3.5,
     regime_bullish: bool = True,
+    nifty_roc20: float = 0.0,
 ) -> Dict[str, Any]:
     """
-    Dual-Engine White-Box Scoring (0-100):
-      - Layer 1 (Trend Base, up to 55 pts): Price > EMA20, EMA20 > EMA50, Healthy ATR, Volume
-      - Layer 2 (SMC Booster, up to 45 pts): Fresh Bullish FVG 50% mitigation test + Breakaway Gap momentum
+    Dual-Engine White-Box Scoring (0-100) with RS Leader + RSI Quality Filter:
+      - Layer 1 (Trend + RS Leader + RSI, up to 55 pts)
+      - Layer 2 (SMC Booster: FVG 50% + Breakaway Gap, up to 45 pts)
     """
     enriched = add_indicators(df)
     if enriched.empty or len(enriched) < 50:
@@ -257,14 +250,16 @@ def score_stock_snapshot(
             "Ticker": ticker,
             "Sector": get_sector(ticker),
             "Status": "NO DATA",
+            "Grade": "-",
             "Score": 0,
+            "RS_vs_Nifty": 0.0,
+            "RSI14": 0.0,
             "Setup": "Insufficient History",
             "SMC_Signal": "None",
             "Entry": 0.0,
             "StopLoss": 0.0,
             "Target": 0.0,
             "ATR14": 0.0,
-            "ATR_Pct": 0.0,
         }
 
     last = enriched.iloc[-1]
@@ -274,6 +269,9 @@ def score_stock_snapshot(
     ema50 = safe_float(last["EMA50"])
     atr14 = safe_float(last["ATR14"])
     atr_pct = safe_float(last["ATR_Pct"])
+    rsi14 = safe_float(last["RSI14"], default=50.0)
+    roc20 = safe_float(last["ROC20"])
+    rs_vs_nifty = roc20 - nifty_roc20
     vol = safe_float(last["Volume"])
     vol_ma20 = safe_float(last["Vol_MA20"], default=1.0)
 
@@ -281,25 +279,28 @@ def score_stock_snapshot(
     setup_tags: List[str] = []
     smc_tags: List[str] = []
 
-    # --- Layer 1: Trend Base (max 55 pts) ---
+    # --- Layer 1: Trend + Relative Strength + RSI Quality (max 55 pts) ---
     if close > ema20:
-        score += 20
+        score += 15
         setup_tags.append("EMA20 Trend")
     if ema20 > ema50:
-        score += 15
-    if 0.8 <= atr_pct <= 4.5:
         score += 12
-    elif atr_pct > 0:
-        score += 5
-    if vol_ma20 > 0 and vol >= vol_ma20:
-        score += 8
+    if rs_vs_nifty > 0:
+        score += 12
+        setup_tags.append("RS Leader")
+    if 48.0 <= rsi14 <= 70.0:
+        score += 10
+    elif rsi14 > 75.0:
+        score = max(0, score - 8)
+        smc_tags.append("Overbought RSI")
+    if 0.8 <= atr_pct <= 4.5 and vol_ma20 > 0 and vol >= vol_ma20:
+        score += 6
 
     # --- Layer 2: SMC Booster (max 45 pts) ---
     fvg_zones = detect_fvg_zones(enriched, lookback=45)
     bull_fvgs = [z for z in fvg_zones if z["type"] == "Bullish FVG" and z["is_fresh"]]
     bear_fvgs = [z for z in fvg_zones if z["type"] == "Bearish FVG" and z["is_fresh"]]
 
-    # Check if price is testing/mitigating a fresh Bullish FVG 50% midpoint or just above it
     fvg_hit = False
     for z in reversed(bull_fvgs[-4:]):
         if z["bottom"] <= low <= z["top"] * 1.015 and close >= z["midpoint"]:
@@ -309,21 +310,18 @@ def score_stock_snapshot(
             fvg_hit = True
             break
     if not fvg_hit and bull_fvgs:
-        # Fresh bullish FVG support below current price
         nearest = bull_fvgs[-1]
         if close > nearest["top"] and ((close - nearest["top"]) / close) <= 0.04:
             score += 15
             setup_tags.append("Bullish FVG Support")
             smc_tags.append(f"Bull FVG ({nearest['bottom']}–{nearest['top']})")
 
-    # Penalize if immediately under a fresh Bearish FVG resistance
     for z in reversed(bear_fvgs[-3:]):
         if z["bottom"] * 0.99 <= close <= z["top"]:
             score = max(0, score - 12)
             smc_tags.append("Bearish FVG Overhead")
             break
 
-    # Check recent Market Gaps (last 10 bars)
     recent_gaps = detect_market_gaps(enriched.tail(15), lookback=15)
     for g in reversed(recent_gaps[-3:]):
         if g["direction"] == "Gap Up" and "Breakaway" in g["gap_class"] and not g["filled"]:
@@ -343,33 +341,43 @@ def score_stock_snapshot(
 
     if not regime_bullish:
         status = "PAUSED (MACRO)"
+        grade = "-"
+    elif score >= 78 and close > ema20 and atr14 > 0:
+        status = "READY"
+        grade = "A+"
     elif score >= 60 and close > ema20 and atr14 > 0:
         status = "READY"
-    elif score >= 40:
+        grade = "A"
+    elif score >= 42:
         status = "WATCH"
+        grade = "B"
     else:
         status = "AVOID"
+        grade = "C"
 
     return {
         "Ticker": ticker,
         "Sector": get_sector(ticker),
         "Status": status,
+        "Grade": grade,
         "Score": score,
+        "RS_vs_Nifty": round(rs_vs_nifty, 2),
+        "RSI14": round(rsi14, 1),
         "Setup": " + ".join(setup_tags) if setup_tags else "No Confluence",
         "SMC_Signal": " | ".join(smc_tags) if smc_tags else "None",
         "Entry": round(close, 2),
         "StopLoss": round(stop_loss, 2),
         "Target": round(target, 2),
         "ATR14": round(atr14, 2),
-        "ATR_Pct": round(atr_pct, 2),
     }
 
 
 def scan_watchlist(
     stock_data: Dict[str, pd.DataFrame],
     sl_mult: float = 1.5,
-    tp_mult: float = 3.0,
+    tp_mult: float = 3.5,
     regime_bullish: bool = True,
+    nifty_roc20: float = 0.0,
 ) -> pd.DataFrame:
     """Scan all watchlist stocks and sort by Score descending."""
     rows = [
@@ -379,9 +387,10 @@ def scan_watchlist(
             sl_mult=sl_mult,
             tp_mult=tp_mult,
             regime_bullish=regime_bullish,
+            nifty_roc20=nifty_roc20,
         )
         for t, df in stock_data.items()
     ]
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows).sort_values(by=["Score", "Ticker"], ascending=[False, True]).reset_index(drop=True)
+    return pd.DataFrame(rows).sort_values(by=["Score", "RS_vs_Nifty"], ascending=[False, False]).reset_index(drop=True)
