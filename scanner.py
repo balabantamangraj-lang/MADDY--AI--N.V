@@ -56,25 +56,29 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 def detect_fvg_zones(
     df: pd.DataFrame,
     lookback: int = 80,
-    min_gap_pct: float = 0.002,
+    min_atr_displacement: float = 0.30,
 ) -> List[Dict[str, Any]]:
-    """3-Candle Fair Value Gap (FVG) detector with 50% midpoint & mitigation tracking."""
-    if df is None or len(df) < 5:
+    """3-Candle Fair Value Gap (FVG) detector requiring >= 0.3 ATR displacement + 50% midpoint."""
+    enriched = add_indicators(df) if "ATR14" not in df.columns else df
+    if enriched is None or len(enriched) < 5:
         return []
 
-    sub = df.tail(lookback).copy()
+    sub = enriched.tail(lookback).copy()
     highs = sub["High"].to_numpy(dtype=float)
     lows = sub["Low"].to_numpy(dtype=float)
     closes = sub["Close"].to_numpy(dtype=float)
+    atrs = sub["ATR14"].bfill().fillna(0.0).to_numpy(dtype=float)
     dates = sub.index
 
     zones: List[Dict[str, Any]] = []
     n = len(sub)
 
     for i in range(2, n):
+        atr_ref = atrs[i - 1] if atrs[i - 1] > 0 else (closes[i - 1] * 0.01)
+        min_disp = min_atr_displacement * atr_ref
         if lows[i] > highs[i - 2]:
             gap_size = lows[i] - highs[i - 2]
-            if closes[i - 1] > 0 and (gap_size / closes[i - 1]) >= min_gap_pct:
+            if gap_size >= min_disp:
                 bottom = float(highs[i - 2])
                 top = float(lows[i])
                 mid = (top + bottom) / 2.0
@@ -105,7 +109,7 @@ def detect_fvg_zones(
                 )
         elif highs[i] < lows[i - 2]:
             gap_size = lows[i - 2] - highs[i]
-            if closes[i - 1] > 0 and (gap_size / closes[i - 1]) >= min_gap_pct:
+            if gap_size >= min_disp:
                 bottom = float(highs[i])
                 top = float(lows[i - 2])
                 mid = (top + bottom) / 2.0
@@ -337,18 +341,19 @@ def score_stock_snapshot(
 
     score = int(min(max(score, 0), 100))
     stop_loss = max(0.05, close - sl_mult * atr14)
-    target = close + tp_mult * atr14
+    risk_unit = max(0.01, close - stop_loss)
+    target = max(close + tp_mult * atr14, close + 2.2 * risk_unit)
 
     if not regime_bullish:
         status = "PAUSED (MACRO)"
         grade = "-"
-    elif score >= 78 and close > ema20 and atr14 > 0:
+    elif score >= 85 and close > ema20 and atr14 > 0:
         status = "READY"
         grade = "A+"
-    elif score >= 60 and close > ema20 and atr14 > 0:
+    elif score >= 75 and close > ema20 and atr14 > 0:
         status = "READY"
         grade = "A"
-    elif score >= 42:
+    elif score >= 55:
         status = "WATCH"
         grade = "B"
     else:

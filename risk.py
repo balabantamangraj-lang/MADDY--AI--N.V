@@ -30,6 +30,54 @@ class RiskConfig:
     max_portfolio_heat_pct: float = 0.05
     max_correlation: float = 0.80
     kill_switch_dd_pct: float = 0.25
+    min_rr_ratio: float = 2.2              # Lock minimum 2.2:1 Reward-to-Risk
+    be_trigger_r: float = 1.2              # Shift SL to Break-Even at +1.2R
+    chandelier_atr_mult: float = 2.0       # Chandelier Trailing Stop distance
+
+
+def enforce_min_rr(
+    entry_price: float,
+    stop_loss: float,
+    target: float,
+    min_rr: float = 2.2,
+) -> float:
+    """Lock target so Reward-to-Risk is always at least min_rr (default 2.2:1)."""
+    risk_unit = max(0.01, entry_price - stop_loss)
+    min_target = entry_price + (min_rr * risk_unit)
+    return round(max(float(target), min_target), 2)
+
+
+def update_chandelier_stop(
+    entry_price: float,
+    current_sl: float,
+    highest_high: float,
+    atr_now: float,
+    init_risk: float,
+    config: RiskConfig = RiskConfig(),
+    buffer_pct: float = 0.0015,
+) -> Tuple[float, str]:
+    """
+    Two-stage Chandelier Trailing Stop-Loss:
+      Stage 1 (Break-Even): Once profit reaches +be_trigger_r (1.2R), shift SL to entry + fee buffer.
+      Stage 2 (Chandelier Trail): Trail SL at (highest_high - chandelier_atr_mult * ATR14), ratchet up only.
+    Returns (new_stop_loss, stage_label).
+    """
+    if init_risk <= 0 or highest_high <= entry_price:
+        return current_sl, "INITIAL"
+
+    r_multiple = (highest_high - entry_price) / init_risk
+    if r_multiple < config.be_trigger_r:
+        return current_sl, "INITIAL"
+
+    be_stop = entry_price * (1.0 + buffer_pct)
+    chandelier_stop = highest_high - (config.chandelier_atr_mult * max(atr_now, 0.01))
+    new_sl = max(current_sl, be_stop, chandelier_stop)
+
+    if chandelier_stop > be_stop and new_sl > current_sl:
+        return round(new_sl, 2), "CHANDELIER"
+    if new_sl > current_sl:
+        return round(new_sl, 2), "BREAKEVEN"
+    return current_sl, ("CHANDELIER" if current_sl > be_stop else "BREAKEVEN")
 
 
 def calculate_position_size(

@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from data_feed import get_sector, safe_float
-from risk import RiskConfig, evaluate_trade_gate
+from risk import RiskConfig, enforce_min_rr, evaluate_trade_gate, update_chandelier_stop
 from scanner import add_indicators
 
 
@@ -27,6 +27,7 @@ def _precompute_smc_flags(df: pd.DataFrame) -> pd.DataFrame:
     closes = out["Close"].to_numpy(dtype=float)
     vols = out["Volume"].to_numpy(dtype=float)
     vol_ma = out["Vol_MA20"].fillna(out["Volume"]).to_numpy(dtype=float)
+    atrs = out["ATR14"].bfill().fillna(0.0).to_numpy(dtype=float)
     n = len(out)
 
     fvg_support = np.zeros(n, dtype=bool)
@@ -34,8 +35,8 @@ def _precompute_smc_flags(df: pd.DataFrame) -> pd.DataFrame:
     active_fvgs: List[Tuple[float, float, float, int]] = []
 
     for i in range(2, n):
-        if lows[i] > highs[i - 2] and closes[i - 1] > 0:
-            if (lows[i] - highs[i - 2]) / closes[i - 1] >= 0.002:
+        atr_ref = atrs[i - 1] if atrs[i - 1] > 0 else (closes[i - 1] * 0.01)
+        if lows[i] > highs[i - 2] and (lows[i] - highs[i - 2]) >= (0.30 * atr_ref):
                 b = highs[i - 2]
                 t = lows[i]
                 active_fvgs.append((b, t, (b + t) / 2.0, i))
@@ -210,14 +211,18 @@ def run_portfolio_backtest(
                 )
                 to_close.append(ticker)
             elif is_alpha_mode or (is_winrate_mode and pos["partial_taken"]):
-                init_risk = pos["init_risk"]
-                if init_risk > 0 and (pos["highest_high"] - pos["entry"]) >= 1.25 * init_risk:
-                    be_stop = pos["entry"] * (1.0 + slippage_pct + commission_pct)
-                    chandelier = pos["highest_high"] - 2.0 * atr_now
-                    new_sl = max(pos["stop_loss"], be_stop, chandelier)
-                    if new_sl > pos["stop_loss"]:
-                        pos["stop_loss"] = new_sl
-                        pos["trailed"] = True
+                new_sl, stage = update_chandelier_stop(
+                    entry_price=pos["entry"],
+                    current_sl=pos["stop_loss"],
+                    highest_high=pos["highest_high"],
+                    atr_now=atr_now,
+                    init_risk=pos["init_risk"],
+                    config=risk_config,
+                    buffer_pct=slippage_pct + commission_pct,
+                )
+                if new_sl > pos["stop_loss"]:
+                    pos["stop_loss"] = new_sl
+                    pos["trailed"] = True
 
         for ticker in to_close:
             open_positions.pop(ticker, None)
@@ -308,7 +313,8 @@ def run_portfolio_backtest(
                 eff_tp_mult = min(tp_mult, 2.4) if is_winrate_mode else tp_mult
 
                 stop_loss = max(0.05, entry_exec - eff_sl_mult * atr14)
-                target = entry_exec + eff_tp_mult * atr14
+                raw_target = entry_exec + eff_tp_mult * atr14
+                target = enforce_min_rr(entry_exec, stop_loss, raw_target, min_rr=risk_config.min_rr_ratio)
 
                 eff_cfg = RiskConfig(
                     risk_per_trade_pct=0.015 if ((is_alpha_mode or is_winrate_mode) and (fvg_hit or gap_hit)) else risk_config.risk_per_trade_pct,
