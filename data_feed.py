@@ -1,3 +1,4 @@
+```python
 """
 data_feed.py — Safe market data loader & Broker API Bridge for Maddy AI.
 Features:
@@ -40,6 +41,16 @@ DEFAULT_WATCHLIST: List[str] = [
     "BHARTIARTL.NS",
     "ITC.NS",
     "TATAMOTORS.NS",
+    "M&M.NS",
+    "SUNPHARMA.NS",
+    "BAJFINANCE.NS",
+    "TITAN.NS",
+    "AXISBANK.NS",
+    "HCLTECH.NS",
+    "MARUTI.NS",
+    "DRREDDY.NS",
+    "BEL.NS",
+    "NTPC.NS",
 ]
 
 SECTOR_MAP: Dict[str, str] = {
@@ -64,6 +75,10 @@ SECTOR_MAP: Dict[str, str] = {
     "MARUTI.NS": "Auto",
     "SUNPHARMA.NS": "Pharma",
     "DRREDDY.NS": "Pharma",
+    "BAJFINANCE.NS": "Finance",
+    "TITAN.NS": "Consumer",
+    "BEL.NS": "Defence",
+    "NTPC.NS": "Power",
 }
 
 
@@ -285,3 +300,4 @@ class BrokerBridge:
             "product": "CNC",
             "dry_run": not self.is_configured,
         }
+```
