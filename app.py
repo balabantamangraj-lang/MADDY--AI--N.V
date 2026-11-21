@@ -6,12 +6,13 @@ Deploy free from your phone via GitHub + Streamlit Community Cloud!
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
+import streamlit.components.v1 as components
 
 from alerts import format_signal_message, send_telegram_alert
 from backtest import (
@@ -171,6 +172,15 @@ init_paper_db()
 # ============================================================================
 with st.sidebar:
     st.header("Maddy AI Controls")
+    if st.button("Refresh Live Data Now", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+    auto_refresh_choice = st.selectbox(
+        "Auto-Refresh Interval",
+        ["Off", "Every 5 min", "Every 15 min"],
+        index=0,
+        help="Automatically reloads fresh NSE prices while this tab stays open.",
+    )
     use_demo_mode = st.toggle(
         "Offline Demo Data Mode",
         value=False,
@@ -214,7 +224,15 @@ with st.sidebar:
 # Header & Data Load
 # ============================================================================
 st.title("Maddy AI — Personal Quant Terminal")
-st.caption("Dual-Engine White-Box Quant Terminal · NSE / Nifty 50 · SMC (FVG + Gaps) · Institutional Risk Gate")
+ist_time = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%d %b %Y · %I:%M %p IST")
+st.caption(f"Dual-Engine White-Box Quant Terminal · NSE / Nifty 50 · Updated: {ist_time}")
+
+if auto_refresh_choice != "Off":
+    refresh_ms = 300_000 if "5" in auto_refresh_choice else 900_000
+    components.html(
+        f"<script>setTimeout(function(){{ window.parent.location.reload(); }}, {refresh_ms});</script>",
+        height=0,
+    )
 
 if use_demo_mode:
     nifty_df = generate_demo_ohlcv(BENCHMARK_TICKER, days=380, seed=42)
