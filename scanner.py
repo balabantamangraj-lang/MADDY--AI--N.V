@@ -32,6 +32,8 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     out["EMA20"] = close.ewm(span=20, adjust=False).mean()
     out["EMA50"] = close.ewm(span=50, adjust=False).mean()
+    out["EMA200"] = close.ewm(span=200, adjust=False).mean()
+    out["High5"] = high.rolling(window=5, min_periods=3).max().shift(1)
 
     tr1 = high - low
     tr2 = (high - prev_close).abs()
@@ -49,6 +51,10 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     avg_loss = loss.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
     rs = np.where(avg_loss > 0, avg_gain / avg_loss, 100.0)
     out["RSI14"] = 100.0 - (100.0 / (1.0 + rs))
+    ag2 = gain.ewm(alpha=1 / 2, min_periods=2, adjust=False).mean()
+    al2 = loss.ewm(alpha=1 / 2, min_periods=2, adjust=False).mean()
+    rs2 = np.where(al2 > 0, ag2 / al2, 100.0)
+    out["RSI2"] = 100.0 - (100.0 / (1.0 + rs2))
     out["ROC20"] = close.pct_change(20) * 100.0
     out["EMA20_Slope"] = out["EMA20"].diff(5)
 

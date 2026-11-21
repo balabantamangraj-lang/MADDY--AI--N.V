@@ -72,7 +72,7 @@ def run_portfolio_backtest(
     slippage_pct: float = 0.0010,
     commission_pct: float = 0.0005,
     stale_signal_bars: int = 3,
-    strategy_mode: str = "Alpha Growth (2.2:1 R:R + Chandelier Trail)",
+    strategy_mode: str = "High Accuracy (EMA200 + RSI2 Snapback)",
     risk_config: RiskConfig = RiskConfig(),
 ) -> Dict[str, Any]:
     """
@@ -90,6 +90,7 @@ def run_portfolio_backtest(
         return {"error": "Missing stock or Nifty 50 data."}
 
     mode_str = str(strategy_mode)
+    is_accuracy_mode = "High Accuracy" in mode_str
     is_winrate_mode = "High Win-Rate" in mode_str
     is_alpha_mode = "Alpha Growth" in mode_str
 
@@ -167,6 +168,10 @@ def run_portfolio_backtest(
             exit_price = None
             exit_reason = None
 
+            rsi2_now = safe_float(row["RSI2"], default=50.0)
+            high5_now = safe_float(row["High5"], default=high)
+            bars_held = bar_idx - pos["entry_bar_idx"]
+
             if low <= pos["stop_loss"]:
                 exit_price = pos["stop_loss"] * (1.0 - slippage_pct)
                 if pos["partial_taken"]:
@@ -175,6 +180,12 @@ def run_portfolio_backtest(
                     exit_reason = "Trailing Stop"
                 else:
                     exit_reason = "Stop-Loss"
+            elif is_accuracy_mode and bars_held >= 1 and close > pos["entry"] * (1.0 + 2 * (slippage_pct + commission_pct)) and (close >= high5_now or rsi2_now >= 75.0):
+                exit_price = close * (1.0 - slippage_pct)
+                exit_reason = "Snapback Profit"
+            elif is_accuracy_mode and bars_held >= 12:
+                exit_price = close * (1.0 - slippage_pct)
+                exit_reason = "Time Exit (12D)"
             elif is_winrate_mode and high >= pos["target"] * 1.8:
                 exit_price = (pos["target"] * 1.8) * (1.0 - slippage_pct)
                 exit_reason = "Runner Target"
@@ -277,7 +288,15 @@ def run_portfolio_backtest(
                 dist_pct = ((close - ema20) / ema20 * 100.0) if ema20 > 0 else 99.0
                 smc_boost = fvg_hit or gap_hit
 
-                if is_winrate_mode:
+                if is_accuracy_mode:
+                    ema200 = safe_float(row["EMA200"], default=ema50)
+                    rsi2 = safe_float(row["RSI2"], default=50.0)
+                    # Institutional Mean-Reversion in Confirmed Long-Term Uptrend
+                    long_term_up = close > ema200 and ema50 >= ema200 * 0.99 and atr14 > 0
+                    oversold_dip = (rsi2 <= 22.0) or (fvg_hit and rsi2 <= 35.0)
+                    if not (long_term_up and oversold_dip):
+                        continue
+                elif is_winrate_mode:
                     # High Win-Rate + Alpha Hybrid: RS Leader uptrend + pullback/value + green bounce
                     uptrend = close > ema50 and ema20 > ema50 and rs_vs_nifty > 0.0 and atr14 > 0 and 0.6 <= atr_pct <= 4.5
                     near_value = (-1.5 <= dist_pct <= 3.5) or (low <= ema20 * 1.015 and close >= ema20) or smc_boost
@@ -312,7 +331,9 @@ def run_portfolio_backtest(
             candidates.sort(key=lambda x: x[0], reverse=True)
 
             for rs_val, ticker, close, atr14, fvg_hit, gap_hit in candidates:
-                if is_winrate_mode:
+                if is_accuracy_mode:
+                    setup_label = "EMA200 + FVG Snapback" if fvg_hit else "EMA200 + RSI2 Dip"
+                elif is_winrate_mode:
                     setup_label = "Pullback + FVG 50%" if fvg_hit else "EMA20 Pullback Bounce"
                 elif is_alpha_mode:
                     setup_label = "A+ FVG/Gap Leader" if (fvg_hit or gap_hit) else "RS Leader + EMA"
@@ -322,8 +343,15 @@ def run_portfolio_backtest(
                 pending_signals[ticker] = {"bar_idx": bar_idx, "setup": setup_label}
 
                 entry_exec = close * (1.0 + slippage_pct)
-                eff_sl_mult = max(sl_mult, 1.8) if is_winrate_mode else sl_mult
-                eff_tp_mult = min(tp_mult, 2.4) if is_winrate_mode else tp_mult
+                if is_accuracy_mode:
+                    eff_sl_mult = max(sl_mult, 2.5)
+                    eff_tp_mult = max(tp_mult, 3.0)
+                elif is_winrate_mode:
+                    eff_sl_mult = max(sl_mult, 1.8)
+                    eff_tp_mult = min(tp_mult, 2.4)
+                else:
+                    eff_sl_mult = sl_mult
+                    eff_tp_mult = tp_mult
 
                 stop_loss = max(0.05, entry_exec - eff_sl_mult * atr14)
                 raw_target = entry_exec + eff_tp_mult * atr14
@@ -381,6 +409,7 @@ def run_portfolio_backtest(
                 cash -= total_cost
                 open_positions[ticker] = {
                     "entry_date": dt,
+                    "entry_bar_idx": bar_idx,
                     "entry": entry_exec,
                     "stop_loss": stop_loss,
                     "init_risk": max(0.01, entry_exec - stop_loss),
@@ -484,7 +513,7 @@ def run_parameter_heatmap(
     stock_data: Dict[str, pd.DataFrame],
     nifty_df: pd.DataFrame,
     initial_capital: float = 100_000.0,
-    strategy_mode: str = "Alpha Growth (2.2:1 R:R + Chandelier Trail)",
+    strategy_mode: str = "High Accuracy (EMA200 + RSI2 Snapback)",
     sl_grid: List[float] = None,
     tp_grid: List[float] = None,
 ) -> pd.DataFrame:
@@ -512,7 +541,7 @@ def run_walk_forward_validation(
     stock_data: Dict[str, pd.DataFrame],
     nifty_df: pd.DataFrame,
     initial_capital: float = 100_000.0,
-    strategy_mode: str = "Alpha Growth (2.2:1 R:R + Chandelier Trail)",
+    strategy_mode: str = "High Accuracy (EMA200 + RSI2 Snapback)",
     n_splits: int = 3,
 ) -> pd.DataFrame:
     """Rolling Walk-Forward Optimization (In-Sample -> Unseen Out-of-Sample)."""

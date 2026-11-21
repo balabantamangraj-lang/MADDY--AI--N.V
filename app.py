@@ -185,11 +185,11 @@ with st.sidebar:
     )
     strategy_mode = st.selectbox(
         "Strategy Engine Mode",
-        ["Alpha Growth (2.2:1 R:R + Chandelier Trail)", "High Win-Rate (Pullback + Partial Lock)", "Balanced (Fixed TP)"],
+        ["High Accuracy (EMA200 + RSI2 Snapback)", "Alpha Growth (2.2:1 R:R + Chandelier Trail)", "High Win-Rate (Pullback + Partial Lock)", "Balanced (Fixed TP)"],
         index=0,
         help="Alpha Growth filters for Nifty-outperforming RS Leaders, shifts SL to breakeven at +1.5R, and trails winners with a 2x ATR Chandelier stop.",
     )
-    sl_mult = st.slider("Stop-Loss ATR Multiplier", 1.0, 3.0, 1.5, 0.1)
+    sl_mult = st.slider("Stop-Loss ATR Multiplier", 1.0, 3.0, 2.0, 0.1)
     tp_mult = st.slider("Take-Profit ATR Multiplier", 1.5, 6.0, 3.5, 0.25)
     period = st.selectbox("Backtest Window", ["1y", "2y", "3y"], index=1)
 
