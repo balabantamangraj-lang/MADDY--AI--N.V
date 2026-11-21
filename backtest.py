@@ -72,8 +72,9 @@ def run_portfolio_backtest(
     slippage_pct: float = 0.0010,
     commission_pct: float = 0.0005,
     stale_signal_bars: int = 3,
-    strategy_mode: str = "High Accuracy (EMA200 + RSI2 Snapback)",
+    strategy_mode: str = "Alpha Growth (2.2:1 R:R + Chandelier Trail)",
     risk_config: RiskConfig = RiskConfig(),
+    max_atr_pct: float = 4.5,
 ) -> Dict[str, Any]:
     """
     Run multi-asset portfolio backtest across 3 white-box engine modes:
@@ -298,7 +299,7 @@ def run_portfolio_backtest(
                         continue
                 elif is_winrate_mode:
                     # High Win-Rate + Alpha Hybrid: RS Leader uptrend + pullback/value + green bounce
-                    uptrend = close > ema50 and ema20 > ema50 and rs_vs_nifty > 0.0 and atr14 > 0 and 0.6 <= atr_pct <= 4.5
+                    uptrend = close > ema50 and ema20 > ema50 and rs_vs_nifty > 0.0 and atr14 > 0 and 0.6 <= atr_pct <= max_atr_pct
                     near_value = (-1.5 <= dist_pct <= 3.5) or (low <= ema20 * 1.015 and close >= ema20) or smc_boost
                     green_bounce = close > open_p and close > prev_c
                     healthy_rsi = 42.0 <= rsi14 <= 68.0
@@ -315,14 +316,14 @@ def run_portfolio_backtest(
                         and ema_slope > 0.0
                         and adx14 >= 20.0
                         and atr14 > 0
-                        and 0.8 <= atr_pct <= 4.5
+                        and 0.8 <= atr_pct <= max_atr_pct
                     )
                     # Strict Confluence Score check (>= 75 equivalent: Leader + Trend + Momentum + Volume/SMC)
                     vol_or_smc = (vol_avg > 0 and vol_now >= vol_avg) or smc_boost
                     if not (trend_ok and rs_vs_nifty > 0.0 and 50.0 <= rsi14 <= 68.0 and (dist_pct <= 3.5 or smc_boost) and vol_or_smc):
                         continue
                 else:
-                    trend_ok = close > ema20 and ema20 > ema50 and atr14 > 0 and 0.8 <= atr_pct <= 4.5
+                    trend_ok = close > ema20 and ema20 > ema50 and atr14 > 0 and 0.8 <= atr_pct <= max_atr_pct
                     if not (trend_ok and (dist_pct <= 3.0 or smc_boost)):
                         continue
 
@@ -516,6 +517,7 @@ def run_parameter_heatmap(
     strategy_mode: str = "High Accuracy (EMA200 + RSI2 Snapback)",
     sl_grid: List[float] = None,
     tp_grid: List[float] = None,
+    max_atr_pct: float = 4.5,
 ) -> pd.DataFrame:
     """Evaluate Net Return % across a grid of SL x TP ATR multipliers."""
     sl_vals = sl_grid or [1.5, 1.8, 2.0, 2.5]
@@ -531,6 +533,7 @@ def run_parameter_heatmap(
                 sl_mult=s,
                 tp_mult=t,
                 strategy_mode=strategy_mode,
+                max_atr_pct=max_atr_pct,
             )
             ret = res["metrics"]["NetReturn%"] if "metrics" in res else 0.0
             matrix.loc[f"SL {s:.1f}x", f"TP {t:.1f}x"] = round(float(ret), 2)
@@ -543,6 +546,7 @@ def run_walk_forward_validation(
     initial_capital: float = 100_000.0,
     strategy_mode: str = "High Accuracy (EMA200 + RSI2 Snapback)",
     n_splits: int = 3,
+    max_atr_pct: float = 4.5,
 ) -> pd.DataFrame:
     """Rolling Walk-Forward Optimization (In-Sample -> Unseen Out-of-Sample)."""
     if nifty_df is None or len(nifty_df) < 180:
@@ -576,7 +580,7 @@ def run_walk_forward_validation(
         for sl_m, tp_m in candidate_pairs:
             res_is = run_portfolio_backtest(
                 is_stocks, is_nifty, initial_capital=initial_capital,
-                sl_mult=sl_m, tp_mult=tp_m, strategy_mode=strategy_mode,
+                sl_mult=sl_m, tp_mult=tp_m, strategy_mode=strategy_mode, max_atr_pct=max_atr_pct,
             )
             if "metrics" in res_is and res_is["metrics"]["NetReturn%"] > best_is_ret:
                 best_is_ret = res_is["metrics"]["NetReturn%"]
@@ -584,7 +588,7 @@ def run_walk_forward_validation(
 
         res_oos = run_portfolio_backtest(
             oos_stocks, oos_nifty, initial_capital=initial_capital,
-            sl_mult=best_pair[0], tp_mult=best_pair[1], strategy_mode=strategy_mode,
+            sl_mult=best_pair[0], tp_mult=best_pair[1], strategy_mode=strategy_mode, max_atr_pct=max_atr_pct,
         )
         oos_m = res_oos.get("metrics", {})
 

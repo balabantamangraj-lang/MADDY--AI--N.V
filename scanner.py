@@ -256,10 +256,11 @@ def check_nifty_regime(nifty_df: pd.DataFrame) -> Dict[str, Any]:
 def score_stock_snapshot(
     ticker: str,
     df: pd.DataFrame,
-    sl_mult: float = 1.5,
+    sl_mult: float = 2.0,
     tp_mult: float = 3.5,
     regime_bullish: bool = True,
     nifty_roc20: float = 0.0,
+    max_atr_pct: float = 4.5,
 ) -> Dict[str, Any]:
     """
     Dual-Engine White-Box Scoring (0-100) with RS Leader + RSI Quality Filter:
@@ -274,7 +275,8 @@ def score_stock_snapshot(
             "Status": "NO DATA",
             "Grade": "-",
             "Score": 0,
-            "RS_vs_Nifty": 0.0,
+            "RS_vs_Bench": 0.0,
+            "ADX14": 0.0,
             "RSI14": 0.0,
             "Setup": "Insufficient History",
             "SMC_Signal": "None",
@@ -315,7 +317,7 @@ def score_stock_snapshot(
     elif rsi14 > 75.0:
         score = max(0, score - 8)
         smc_tags.append("Overbought RSI")
-    if 0.8 <= atr_pct <= 4.5 and vol_ma20 > 0 and vol >= vol_ma20:
+    if 0.8 <= atr_pct <= max_atr_pct and vol_ma20 > 0 and vol >= vol_ma20:
         score += 6
 
     # --- Layer 2: SMC Booster (max 45 pts) ---
@@ -384,7 +386,8 @@ def score_stock_snapshot(
         "Status": status,
         "Grade": grade,
         "Score": score,
-        "RS_vs_Nifty": round(rs_vs_nifty, 2),
+        "RS_vs_Bench": round(rs_vs_nifty, 2),
+        "ADX14": round(safe_float(last.get("ADX14", 0.0)), 1),
         "RSI14": round(rsi14, 1),
         "Setup": " + ".join(setup_tags) if setup_tags else "No Confluence",
         "SMC_Signal": " | ".join(smc_tags) if smc_tags else "None",
@@ -397,12 +400,13 @@ def score_stock_snapshot(
 
 def scan_watchlist(
     stock_data: Dict[str, pd.DataFrame],
-    sl_mult: float = 1.5,
+    sl_mult: float = 2.0,
     tp_mult: float = 3.5,
     regime_bullish: bool = True,
     nifty_roc20: float = 0.0,
+    max_atr_pct: float = 4.5,
 ) -> pd.DataFrame:
-    """Scan all watchlist stocks and sort by Score descending."""
+    """Scan all watchlist assets and sort by Score and Relative Strength descending."""
     rows = [
         score_stock_snapshot(
             ticker=t,
@@ -411,9 +415,10 @@ def scan_watchlist(
             tp_mult=tp_mult,
             regime_bullish=regime_bullish,
             nifty_roc20=nifty_roc20,
+            max_atr_pct=max_atr_pct,
         )
         for t, df in stock_data.items()
     ]
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows).sort_values(by=["Score", "RS_vs_Nifty"], ascending=[False, False]).reset_index(drop=True)
+    return pd.DataFrame(rows).sort_values(by=["Score", "RS_vs_Bench"], ascending=[False, False]).reset_index(drop=True)

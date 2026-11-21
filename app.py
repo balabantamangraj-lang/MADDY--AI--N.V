@@ -23,6 +23,8 @@ from backtest import (
 )
 from data_feed import (
     BENCHMARK_TICKER,
+    CRYPTO_BENCHMARK,
+    DEFAULT_CRYPTO_WATCHLIST,
     DEFAULT_WATCHLIST,
     BrokerBridge,
     fetch_ohlcv,
@@ -188,12 +190,25 @@ with st.sidebar:
         value=False,
         help="Instant synthetic NSE-style candles if live yfinance is slow or unavailable.",
     )
+    market_mode = st.radio(
+        "Market Mode",
+        ["NSE Stocks (₹)", "Crypto 24/7 ($)"],
+        index=0,
+        horizontal=True,
+    )
+    is_crypto = "Crypto" in market_mode
+    curr = "$" if is_crypto else "₹"
+    bench_ticker = CRYPTO_BENCHMARK if is_crypto else BENCHMARK_TICKER
+    bench_name = "Bitcoin (BTC-USD)" if is_crypto else "Nifty 50"
+    max_atr_pct = 12.0 if is_crypto else 4.5
+    default_wl = DEFAULT_CRYPTO_WATCHLIST if is_crypto else DEFAULT_WATCHLIST
+
     capital = st.number_input(
-        "Portfolio Capital (₹)",
-        min_value=10_000,
+        f"Portfolio Capital ({curr})",
+        min_value=100 if is_crypto else 10_000,
         max_value=50_000_000,
-        value=100_000,
-        step=10_000,
+        value=1_000 if is_crypto else 100_000,
+        step=500 if is_crypto else 10_000,
     )
     strategy_mode = st.selectbox(
         "Strategy Engine Mode",
@@ -206,9 +221,10 @@ with st.sidebar:
     period = st.selectbox("Backtest Window", ["1y", "2y", "3y"], index=2)
 
     watchlist_text = st.text_area(
-        "NSE Watchlist (1 ticker per line)",
-        value="\n".join(DEFAULT_WATCHLIST),
+        f"{'Crypto' if is_crypto else 'NSE'} Watchlist (1 ticker per line)",
+        value="\n".join(default_wl),
         height=170,
+        key=f"wl_{market_mode}",
     )
     watchlist = [line.strip().upper() for line in watchlist_text.splitlines() if line.strip()]
 
@@ -232,7 +248,7 @@ if os.path.exists("logo.png"):
 else:
     st.title("Maddy AI — Personal Quant Terminal")
 ist_time = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%d %b %Y · %I:%M %p IST")
-st.caption(f"Dual-Engine White-Box Quant Terminal · NSE / Nifty 50 · Updated: {ist_time}")
+st.caption(f"Dual-Engine White-Box Quant Terminal · {market_mode} · Benchmark: {bench_name} · Updated: {ist_time}")
 
 if auto_refresh_choice != "Off":
     refresh_ms = 300_000 if "5" in auto_refresh_choice else 900_000
@@ -242,11 +258,11 @@ if auto_refresh_choice != "Off":
     )
 
 if use_demo_mode:
-    nifty_df = generate_demo_ohlcv(BENCHMARK_TICKER, days=380, seed=42)
+    nifty_df = generate_demo_ohlcv(bench_ticker, days=380, seed=42)
     stock_data = {t: generate_demo_ohlcv(t, days=380, seed=100 + i) for i, t in enumerate(watchlist)}
 else:
     with st.spinner("Loading NSE market data..."):
-        nifty_df = fetch_ohlcv(BENCHMARK_TICKER, period=period)
+        nifty_df = fetch_ohlcv(bench_ticker, period=period)
         stock_data = load_watchlist_data(watchlist, period=period)
 
 if nifty_df.empty or not stock_data:
@@ -265,6 +281,7 @@ bt_results = run_portfolio_backtest(
     tp_mult=tp_mult,
     strategy_mode=strategy_mode,
     risk_config=risk_cfg,
+    max_atr_pct=max_atr_pct,
 )
 
 # ============================================================================
@@ -286,11 +303,11 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 with tab1:
     if regime["is_bullish"]:
         st.success(
-            f"**Nifty 50 Regime: {regime['label']}** | Close: {regime['close']:,.2f} | EMA20: {regime['ema20']:,.2f} | EMA50: {regime['ema50']:,.2f}"
+            f"**{bench_name} Regime: {regime['label']}** | Close: {regime['close']:,.2f} | EMA20: {regime['ema20']:,.2f} | EMA50: {regime['ema50']:,.2f}"
         )
     else:
         st.error(
-            f"**Nifty 50 Regime: {regime['label']}** | Close: {regime['close']:,.2f} | EMA20: {regime['ema20']:,.2f} | EMA50: {regime['ema50']:,.2f}"
+            f"**{bench_name} Regime: {regime['label']}** | Close: {regime['close']:,.2f} | EMA20: {regime['ema20']:,.2f} | EMA50: {regime['ema50']:,.2f}"
         )
 
     scan_df = scan_watchlist(
@@ -299,6 +316,7 @@ with tab1:
         tp_mult=tp_mult,
         regime_bullish=regime["is_bullish"],
         nifty_roc20=regime.get("roc20", 0.0),
+        max_atr_pct=max_atr_pct,
     )
 
     if not scan_df.empty:
@@ -325,9 +343,9 @@ with tab1:
                     with st.container(border=True):
                         st.markdown(f"### {row['Ticker']} · {row['Score']}/100")
                         st.caption(f"{row['Sector']} · {row['Setup']}")
-                        st.metric("Entry Price", f"₹{row['Entry']:,.2f}")
-                        st.write(f"**ATR Stop-Loss:** ₹{row['StopLoss']:,.2f}")
-                        st.write(f"**Target:** ₹{row['Target']:,.2f}")
+                        st.metric("Entry Price", f"{curr}{row['Entry']:,.2f}")
+                        st.write(f"**ATR Stop-Loss:** {curr}{row['StopLoss']:,.2f}")
+                        st.write(f"**Target:** {curr}{row['Target']:,.2f}")
                         st.write(f"**1% Risk Qty:** `{qty}` shares")
 
                         b1, b2 = st.columns(2)
@@ -506,7 +524,7 @@ with tab3:
     else:
         m = bt_results["metrics"]
         k1, k2, k3, k4, k5, k6 = st.columns(6)
-        k1.metric("Final Equity", f"₹{m['FinalEquity']:,.0f}", f"{m['NetReturn%']}%")
+        k1.metric("Final Equity", f"{curr}{m['FinalEquity']:,.0f}", f"{m['NetReturn%']}%")
         k2.metric("Max Drawdown", f"{m['MaxDrawdown%']}%")
         k3.metric("Win Rate", f"{m['WinRate%']}%")
         k4.metric("Profit Factor", f"{m['ProfitFactor']}", f"Payoff {m.get('PayoffRatio', 0)}x")
@@ -516,12 +534,12 @@ with tab3:
         eq_df = bt_results["equity_curve"]
         fig_eq = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.68, 0.32])
         fig_eq.add_trace(
-            go.Scatter(x=eq_df.index, y=eq_df["Equity"], name="Maddy AI (₹)", line=dict(color="#4f46e5", width=2.4)),
+            go.Scatter(x=eq_df.index, y=eq_df["Equity"], name=f"Maddy AI ({curr})", line=dict(color="#4f46e5", width=2.4)),
             row=1,
             col=1,
         )
         fig_eq.add_trace(
-            go.Scatter(x=eq_df.index, y=eq_df["NiftyNorm"], name="Nifty 50 Benchmark (₹)", line=dict(color="#94a3b8", width=1.8, dash="dot")),
+            go.Scatter(x=eq_df.index, y=eq_df["NiftyNorm"], name=f"{bench_name} Benchmark ({curr})", line=dict(color="#94a3b8", width=1.8, dash="dot")),
             row=1,
             col=1,
         )
@@ -572,8 +590,8 @@ with tab4:
             mc1, mc2, mc3, mc4 = st.columns(4)
             mc1.metric("Risk of Ruin (25% DD)", f"{mc['risk_of_ruin_pct']}%")
             mc2.metric("Median Max Drawdown", f"{mc['median_max_dd_pct']}%")
-            mc3.metric("5th %ile Worst Equity", f"₹{mc['p5_final_equity']:,.0f}")
-            mc4.metric("Median Final Equity", f"₹{mc['median_final_equity']:,.0f}")
+            mc3.metric("5th %ile Worst Equity", f"{curr}{mc['p5_final_equity']:,.0f}")
+            mc4.metric("Median Final Equity", f"{curr}{mc['median_final_equity']:,.0f}")
 
             x_days = list(range(1, mc["n_days"] + 1))
             fig_mc = go.Figure()
@@ -584,15 +602,15 @@ with tab4:
             fig_mc.add_trace(go.Scatter(x=x_days, y=mc["p95_path"], name="95th %ile", line=dict(color="#10b981", width=2)))
             fig_mc.add_trace(go.Scatter(x=x_days, y=mc["p50_path"], name="Median (50th)", line=dict(color="#4f46e5", width=2.5)))
             fig_mc.add_trace(go.Scatter(x=x_days, y=mc["p5_path"], name="5th %ile Worst-Case", line=dict(color="#ef4444", width=2)))
-            fig_mc.update_layout(height=380, margin=dict(l=10, r=10, t=20, b=10), xaxis_title="Trading Days", yaxis_title="Equity (₹)")
+            fig_mc.update_layout(height=380, margin=dict(l=10, r=10, t=20, b=10), xaxis_title="Trading Days", yaxis_title=f"Equity ({curr})")
             st.plotly_chart(fig_mc, use_container_width=True)
 
     st.divider()
     st.subheader("2. Parameter Stability Heatmap & Walk-Forward Optimization (WFO)")
     if st.button("Run Heatmap + Walk-Forward Validation", type="primary"):
         with st.spinner("Running SL x TP stability grid & WFO splits..."):
-            hm_df = run_parameter_heatmap(stock_data, nifty_df, initial_capital=float(capital), strategy_mode=strategy_mode)
-            wfo_df = run_walk_forward_validation(stock_data, nifty_df, initial_capital=float(capital), strategy_mode=strategy_mode, n_splits=3)
+            hm_df = run_parameter_heatmap(stock_data, nifty_df, initial_capital=float(capital), strategy_mode=strategy_mode, max_atr_pct=max_atr_pct)
+            wfo_df = run_walk_forward_validation(stock_data, nifty_df, initial_capital=float(capital), strategy_mode=strategy_mode, n_splits=3, max_atr_pct=max_atr_pct)
 
         fig_hm = go.Figure(
             data=go.Heatmap(
