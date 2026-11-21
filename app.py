@@ -74,7 +74,7 @@ def init_paper_db() -> None:
                 entry_price REAL NOT NULL,
                 stop_loss REAL NOT NULL,
                 target REAL NOT NULL,
-                qty INTEGER NOT NULL,
+                qty REAL NOT NULL,
                 status TEXT NOT NULL DEFAULT 'OPEN',
                 exit_date TEXT,
                 exit_price REAL,
@@ -98,7 +98,7 @@ def add_paper_trade(
     entry_price: float,
     stop_loss: float,
     target: float,
-    qty: int,
+    qty: float,
 ) -> None:
     init_paper_db()
     with sqlite3.connect(DB_PATH) as conn:
@@ -115,7 +115,7 @@ def add_paper_trade(
                 round(float(entry_price), 2),
                 round(float(stop_loss), 2),
                 round(float(target), 2),
-                int(qty),
+                round(float(qty), 4),
             ),
         )
         conn.commit()
@@ -128,7 +128,7 @@ def close_paper_trade(trade_id: int, exit_price: float) -> None:
         row = cur.fetchone()
         if not row:
             return
-        entry_p, qty = float(row[0]), int(row[1])
+        entry_p, qty = float(row[0]), float(row[1])
         pnl = (float(exit_price) - entry_p) * qty
         conn.execute(
             """
@@ -203,7 +203,7 @@ init_paper_db()
 # ============================================================================
 with st.sidebar:
     st.header("Maddy AI Controls")
-    if st.button("Refresh Live Data Now", use_container_width=True):
+    if st.button("Refresh Live Data Now", width="stretch"):
         st.cache_data.clear()
         st.rerun()
     auto_refresh_choice = st.selectbox(
@@ -373,7 +373,7 @@ with tab1:
         )
 
         st.subheader("Live Signal Table")
-        st.dataframe(scan_df, use_container_width=True, hide_index=True)
+        st.dataframe(scan_df, width="stretch", hide_index=True)
 
         # Upgrade #2: Sector Strength Radar (Top-Down Filter)
         sec_df = compute_sector_strength(scan_df)
@@ -396,7 +396,7 @@ with tab1:
                     xaxis_title=f"Avg 20D Relative Strength vs {bench_name} (%)",
                     yaxis=dict(autorange="reversed"),
                 )
-                st.plotly_chart(fig_sec, use_container_width=True)
+                st.plotly_chart(fig_sec, width="stretch")
 
         ready_df = scan_df[scan_df["Status"] == "READY"]
         st.subheader(f"Exact Trade Cards ({len(ready_df)} READY)")
@@ -406,7 +406,7 @@ with tab1:
         else:
             cols = st.columns(min(3, len(ready_df)))
             for idx, (_, row) in enumerate(ready_df.iterrows()):
-                qty = int(row["Qty (1% Risk)"])
+                qty = round(float(row["Qty (1% Risk)"]), 4) if allow_frac else int(row["Qty (1% Risk)"])
                 with cols[idx % len(cols)]:
                     with st.container(border=True):
                         st.markdown(f"### {row['Ticker']} · {row['Score']}/100")
@@ -414,10 +414,10 @@ with tab1:
                         st.metric("Entry Price", f"{curr}{row['Entry']:,.2f}")
                         st.write(f"**ATR Stop-Loss:** {curr}{row['StopLoss']:,.2f}")
                         st.write(f"**Target:** {curr}{row['Target']:,.2f}")
-                        st.write(f"**1% Risk Qty:** `{qty}` shares")
+                        st.write(f"**1% Risk Qty:** `{qty}` {'units' if allow_frac else 'shares'}")
 
                         b1, b2 = st.columns(2)
-                        if b1.button("Paper Buy", key=f"pb_{row['Ticker']}", use_container_width=True):
+                        if b1.button("Paper Buy", key=f"pb_{row['Ticker']}", width="stretch"):
                             if qty > 0:
                                 add_paper_trade(
                                     ticker=row["Ticker"],
@@ -429,7 +429,7 @@ with tab1:
                                     qty=qty,
                                 )
                                 st.toast(f"Paper trade logged for {row['Ticker']} ({qty} qty)!")
-                        if b2.button("Telegram", key=f"tg_{row['Ticker']}", use_container_width=True):
+                        if b2.button("Telegram", key=f"tg_{row['Ticker']}", width="stretch"):
                             msg = format_signal_message(row.to_dict(), qty)
                             ok, info = send_telegram_alert(msg)
                             if ok:
@@ -563,7 +563,7 @@ with tab2:
         margin=dict(l=10, r=10, t=30, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
     c_fvg, c_gap = st.columns(2)
     with c_fvg:
@@ -571,7 +571,7 @@ with tab2:
         if fvg_zones:
             st.dataframe(
                 pd.DataFrame(fvg_zones[-6:])[["type", "bottom", "midpoint", "top", "mitigated_50", "is_fresh"]],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
     with c_gap:
@@ -579,7 +579,7 @@ with tab2:
         if gap_zones:
             st.dataframe(
                 pd.DataFrame(gap_zones[-6:])[["direction", "gap_class", "gap_pct", "vol_ratio", "filled"]],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -645,19 +645,19 @@ with tab3:
             col=1,
         )
         fig_eq.update_layout(height=500, margin=dict(l=10, r=10, t=25, b=10), legend=dict(orientation="h", y=1.06))
-        st.plotly_chart(fig_eq, use_container_width=True)
+        st.plotly_chart(fig_eq, width="stretch")
 
         c_tl, c_rj = st.columns(2)
         with c_tl:
             st.subheader(f"Complete Trade Log ({m['TotalTrades']})")
             if not bt_results["trade_log"].empty:
-                st.dataframe(bt_results["trade_log"], use_container_width=True, hide_index=True)
+                st.dataframe(bt_results["trade_log"], width="stretch", hide_index=True)
             else:
                 st.info("No closed trades in this window.")
         with c_rj:
             st.subheader(f"Rejection Ledger ({m['Rejections']})")
             if not bt_results["rejection_ledger"].empty:
-                st.dataframe(bt_results["rejection_ledger"], use_container_width=True, hide_index=True)
+                st.dataframe(bt_results["rejection_ledger"], width="stretch", hide_index=True)
             else:
                 st.info("No signals were rejected by the Institutional Risk Gate.")
 
@@ -693,7 +693,7 @@ with tab4:
             fig_mc.add_trace(go.Scatter(x=x_days, y=mc["p50_path"], name="Median (50th)", line=dict(color="#4f46e5", width=2.5)))
             fig_mc.add_trace(go.Scatter(x=x_days, y=mc["p5_path"], name="5th %ile Worst-Case", line=dict(color="#ef4444", width=2)))
             fig_mc.update_layout(height=380, margin=dict(l=10, r=10, t=20, b=10), xaxis_title="Trading Days", yaxis_title=f"Equity ({curr})")
-            st.plotly_chart(fig_mc, use_container_width=True)
+            st.plotly_chart(fig_mc, width="stretch")
 
     st.divider()
     st.subheader("2. Parameter Stability Heatmap & Walk-Forward Optimization (WFO)")
@@ -713,11 +713,11 @@ with tab4:
             )
         )
         fig_hm.update_layout(height=340, margin=dict(l=10, r=10, t=25, b=10), title="Net Return % (SL vs TP ATR Multipliers)")
-        st.plotly_chart(fig_hm, use_container_width=True)
+        st.plotly_chart(fig_hm, width="stretch")
 
         st.markdown("**Walk-Forward Optimization (In-Sample → Unseen Out-of-Sample)**")
         if not wfo_df.empty:
-            st.dataframe(wfo_df, use_container_width=True, hide_index=True)
+            st.dataframe(wfo_df, width="stretch", hide_index=True)
         else:
             st.info("Select a 2y or 3y historical window for multi-fold Walk-Forward Validation.")
     else:
@@ -742,11 +742,11 @@ with tab5:
     if not open_df.empty:
         for _, r in open_df.iterrows():
             ltp = latest_prices.get(r["ticker"], float(r["entry_price"]))
-            unrealized_pnl += (ltp - float(r["entry_price"])) * int(r["qty"])
+            unrealized_pnl += (ltp - float(r["entry_price"])) * float(r["qty"])
             open_pos_dict[r["ticker"]] = {
                 "entry": float(r["entry_price"]),
                 "stop_loss": float(r["stop_loss"]),
-                "qty": int(r["qty"]),
+                "qty": float(r["qty"]),
                 "sector": r["sector"],
             }
 
@@ -759,7 +759,7 @@ with tab5:
     sector_exp = compute_sector_exposure(open_pos_dict, virtual_equity, latest_prices)
 
     p1, p2, p3, p4 = st.columns(4)
-    p1.metric("Virtual Portfolio Equity", f"₹{virtual_equity:,.2f}", f"₹{(realized_pnl + unrealized_pnl):+,.2f}")
+    p1.metric("Virtual Portfolio Equity", f"{curr}{virtual_equity:,.2f}", f"{curr}{(realized_pnl + unrealized_pnl):+,.2f}")
     p2.metric("Portfolio Heat (Max 5%)", f"{port_heat_pct:.2f}%")
     p3.metric("Open Positions", f"{len(open_df)}")
     p4.metric("25% Kill-Switch", "HALTED" if kill_switch_hit else "ACTIVE · SAFE")
@@ -781,7 +781,7 @@ with tab5:
             )
         )
         fig_heat.update_layout(height=250, margin=dict(l=20, r=20, t=40, b=10))
-        st.plotly_chart(fig_heat, use_container_width=True)
+        st.plotly_chart(fig_heat, width="stretch")
 
     with g2:
         st.markdown("**Sector Exposure (Max 30% per Sector)**")
@@ -800,19 +800,19 @@ with tab5:
     else:
         for _, r in open_df.iterrows():
             ltp = latest_prices.get(r["ticker"], float(r["entry_price"]))
-            u_pnl = (ltp - float(r["entry_price"])) * int(r["qty"])
+            u_pnl = (ltp - float(r["entry_price"])) * float(r["qty"])
             c_info, c_act = st.columns([4, 1])
             c_info.write(
-                f"**{r['ticker']}** ({r['sector']}) · Qty `{r['qty']}` · Entry ₹{r['entry_price']:,.2f} · LTP ₹{ltp:,.2f} · SL ₹{r['stop_loss']:,.2f} · Target ₹{r['target']:,.2f} · **P&L: ₹{u_pnl:+,.2f}**"
+                f"**{r['ticker']}** ({r['sector']}) · Qty `{r['qty']}` · Entry {curr}{r['entry_price']:,.2f} · LTP {curr}{ltp:,.2f} · SL {curr}{r['stop_loss']:,.2f} · Target {curr}{r['target']:,.2f} · **P&L: {curr}{u_pnl:+,.2f}**"
             )
-            if c_act.button("Close @ LTP", key=f"close_{r['id']}", use_container_width=True):
+            if c_act.button("Close @ LTP", key=f"close_{r['id']}", width="stretch"):
                 close_paper_trade(int(r["id"]), ltp)
                 st.rerun()
 
     # Closed Trades + CSV Backup + Reset
     with st.expander(f"Closed Paper Trades ({len(closed_df)}) & Permanent Cloud Journal"):
         if not closed_df.empty:
-            st.dataframe(closed_df, use_container_width=True, hide_index=True)
+            st.dataframe(closed_df, width="stretch", hide_index=True)
         if not paper_df.empty:
             st.download_button(
                 "Download Paper Trade History (CSV)",
@@ -823,10 +823,10 @@ with tab5:
         st.divider()
         st.markdown("**Permanent Cloud Journal (Survives Reboots)**")
         c_sync1, c_sync2 = st.columns(2)
-        if c_sync1.button("Save Journal to GitHub Cloud", use_container_width=True):
+        if c_sync1.button("Save Journal to GitHub Cloud", width="stretch"):
             ok_s, msg_s = push_journal_to_github(paper_df)
             st.success(msg_s) if ok_s else st.info(msg_s)
-        if c_sync2.button("Restore from GitHub Cloud", use_container_width=True):
+        if c_sync2.button("Restore from GitHub Cloud", width="stretch"):
             cloud_df, msg_c = pull_journal_from_github()
             if cloud_df is not None:
                 n_rest = restore_paper_trades_from_df(cloud_df)

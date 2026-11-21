@@ -364,13 +364,17 @@ def score_stock_snapshot(
     risk_unit = max(0.01, close - stop_loss)
     target = max(close + tp_mult * atr14, close + 2.2 * risk_unit)
 
+    adx14 = safe_float(last.get("ADX14", 0.0))
+    ema_slope = safe_float(last.get("EMA20_Slope", 0.0))
+    trend_strong = adx14 >= 20.0 and ema_slope > 0.0
+
     if not regime_bullish:
         status = "PAUSED (MACRO)"
         grade = "-"
-    elif score >= 85 and close > ema20 and atr14 > 0:
+    elif score >= 85 and close > ema20 and atr14 > 0 and trend_strong:
         status = "READY"
         grade = "A+"
-    elif score >= 75 and close > ema20 and atr14 > 0:
+    elif score >= 75 and close > ema20 and atr14 > 0 and trend_strong:
         status = "READY"
         grade = "A"
     elif score >= 55:

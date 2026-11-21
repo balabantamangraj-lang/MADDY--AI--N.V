@@ -41,7 +41,6 @@ DEFAULT_WATCHLIST: List[str] = [
     "SBIN.NS",
     "BHARTIARTL.NS",
     "ITC.NS",
-    "TATAMOTORS.NS",
     "M&M.NS",
     "SUNPHARMA.NS",
     "BAJFINANCE.NS",

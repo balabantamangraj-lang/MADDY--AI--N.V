@@ -247,12 +247,131 @@ def run_portfolio_backtest(
         equity = cash + holdings_val
         peak_equity = max(peak_equity, equity)
 
-        # 2. Expire stale pending signals
-        for t in list(pending_signals.keys()):
-            if bar_idx - pending_signals[t]["bar_idx"] > stale_signal_bars:
-                pending_signals.pop(t, None)
+        # 2. Execute Yesterday's Pending Signals at TODAY'S OPEN (+ slippage) — 100% Realistic!
+        returns_slice = returns_df.loc[:dt]
+        sorted_pending = sorted(
+            list(pending_signals.items()),
+            key=lambda kv: kv[1].get("rs_val", 0.0),
+            reverse=True,
+        )
+        for ticker, sig in sorted_pending:
+            if bar_idx - sig["bar_idx"] > stale_signal_bars:
+                pending_signals.pop(ticker, None)
+                continue
+            if ticker in open_positions:
+                pending_signals.pop(ticker, None)
+                continue
+            df_t = enriched[ticker]
+            if dt not in df_t.index:
+                continue
 
-        # 3. Macro Regime Check on Nifty 50
+            row_open = df_t.loc[dt]
+            if isinstance(row_open, pd.DataFrame):
+                row_open = row_open.iloc[-1]
+
+            open_px = safe_float(row_open["Open"])
+            close_px = safe_float(row_open["Close"])
+            if open_px <= 0:
+                pending_signals.pop(ticker, None)
+                continue
+
+            atr14 = sig["atr14"]
+            setup_label = sig["setup"]
+            fvg_hit = sig["fvg_hit"]
+            gap_hit = sig["gap_hit"]
+
+            entry_exec = open_px * (1.0 + slippage_pct)
+            if is_accuracy_mode:
+                eff_sl_mult = min(sl_mult, 1.6)
+                eff_tp_mult = max(tp_mult, 3.0)
+            elif is_winrate_mode:
+                eff_sl_mult = max(sl_mult, 1.8)
+                eff_tp_mult = min(tp_mult, 2.4)
+            else:
+                eff_sl_mult = sl_mult
+                eff_tp_mult = tp_mult
+
+            stop_loss = max(0.05, entry_exec - eff_sl_mult * atr14)
+            raw_target = entry_exec + eff_tp_mult * atr14
+            target = enforce_min_rr(entry_exec, stop_loss, raw_target, min_rr=risk_config.min_rr_ratio)
+
+            eff_cfg = RiskConfig(
+                risk_per_trade_pct=0.015 if ((is_alpha_mode or is_winrate_mode) and (fvg_hit or gap_hit)) else risk_config.risk_per_trade_pct,
+                max_stock_alloc_pct=risk_config.max_stock_alloc_pct,
+                max_sector_alloc_pct=risk_config.max_sector_alloc_pct,
+                max_portfolio_heat_pct=risk_config.max_portfolio_heat_pct,
+                max_correlation=risk_config.max_correlation,
+                kill_switch_dd_pct=risk_config.kill_switch_dd_pct,
+            )
+
+            approved, qty, reason = evaluate_trade_gate(
+                ticker=ticker,
+                entry_price=entry_exec,
+                stop_loss=stop_loss,
+                equity=equity,
+                peak_equity=peak_equity,
+                open_positions=open_positions,
+                returns_df=returns_slice,
+                current_prices=current_prices,
+                config=eff_cfg,
+                allow_fractional=allow_fractional,
+            )
+
+            if not approved:
+                rejection_ledger.append(
+                    {
+                        "Date": dt.strftime("%Y-%m-%d"),
+                        "Ticker": ticker,
+                        "Sector": get_sector(ticker),
+                        "Setup": setup_label,
+                        "Price": round(open_px, 2),
+                        "RejectionReason": reason,
+                    }
+                )
+                pending_signals.pop(ticker, None)
+                continue
+
+            gross_cost = entry_exec * qty
+            total_cost = gross_cost * (1.0 + commission_pct)
+            if total_cost > cash:
+                rejection_ledger.append(
+                    {
+                        "Date": dt.strftime("%Y-%m-%d"),
+                        "Ticker": ticker,
+                        "Sector": get_sector(ticker),
+                        "Setup": setup_label,
+                        "Price": round(open_px, 2),
+                        "RejectionReason": "Insufficient Cash",
+                    }
+                )
+                pending_signals.pop(ticker, None)
+                continue
+
+            cash -= total_cost
+            open_positions[ticker] = {
+                "entry_date": dt,
+                "entry_bar_idx": bar_idx,
+                "entry": entry_exec,
+                "stop_loss": stop_loss,
+                "init_risk": max(0.01, entry_exec - stop_loss),
+                "atr_entry": atr14,
+                "highest_high": max(open_px, close_px),
+                "trailed": False,
+                "partial_taken": False,
+                "realized_partial_pnl": 0.0,
+                "target": target,
+                "qty": qty,
+                "orig_qty": qty,
+                "cost_basis": total_cost,
+                "orig_cost_basis": total_cost,
+                "sector": get_sector(ticker),
+                "setup": setup_label,
+                "last_price": close_px,
+            }
+            pending_signals.pop(ticker, None)
+            current_prices[ticker] = close_px
+
+        # 3. Macro Regime Check on Benchmark (End-of-Day)
         n_row = nifty.loc[dt]
         if isinstance(n_row, pd.DataFrame):
             n_row = n_row.iloc[-1]
@@ -262,12 +381,10 @@ def run_portfolio_backtest(
             and safe_float(n_row["EMA20"]) >= safe_float(n_row["EMA50"])
         )
 
-        # 4. Entry Scan
+        # 4. End-of-Day Signal Scan -> Queued for NEXT-DAY OPEN Execution
         if nifty_bullish:
-            returns_slice = returns_df.loc[:dt]
-            candidates = []
             for ticker, df_t in enriched.items():
-                if ticker in open_positions or dt not in df_t.index:
+                if ticker in open_positions or ticker in pending_signals or dt not in df_t.index:
                     continue
                 row = df_t.loc[dt]
                 if isinstance(row, pd.DataFrame):
@@ -293,13 +410,11 @@ def run_portfolio_backtest(
                 if is_accuracy_mode:
                     ema200 = safe_float(row["EMA200"], default=ema50)
                     rsi2 = safe_float(row["RSI2"], default=50.0)
-                    # Institutional Mean-Reversion in Confirmed Long-Term Uptrend
                     long_term_up = close > ema200 and ema50 >= ema200 * 0.99 and atr14 > 0
                     oversold_dip = (rsi2 <= 22.0) or (fvg_hit and rsi2 <= 35.0)
                     if not (long_term_up and oversold_dip):
                         continue
                 elif is_winrate_mode:
-                    # High Win-Rate + Alpha Hybrid: RS Leader uptrend + pullback/value + green bounce
                     uptrend = close > ema50 and ema20 > ema50 and rs_vs_nifty > 0.0 and atr14 > 0 and 0.6 <= atr_pct <= max_atr_pct
                     near_value = (-1.5 <= dist_pct <= 3.5) or (low <= ema20 * 1.015 and close >= ema20) or smc_boost
                     green_bounce = close > open_p and close > prev_c
@@ -319,7 +434,6 @@ def run_portfolio_backtest(
                         and atr14 > 0
                         and 0.8 <= atr_pct <= max_atr_pct
                     )
-                    # Strict Confluence Score check (>= 75 equivalent: Leader + Trend + Momentum + Volume/SMC)
                     vol_or_smc = (vol_avg > 0 and vol_now >= vol_avg) or smc_boost
                     if not (trend_ok and rs_vs_nifty > 0.0 and 50.0 <= rsi14 <= 68.0 and (dist_pct <= 3.5 or smc_boost) and vol_or_smc):
                         continue
@@ -328,11 +442,6 @@ def run_portfolio_backtest(
                     if not (trend_ok and (dist_pct <= 3.0 or smc_boost)):
                         continue
 
-                candidates.append((rs_vs_nifty, ticker, close, atr14, fvg_hit, gap_hit))
-
-            candidates.sort(key=lambda x: x[0], reverse=True)
-
-            for rs_val, ticker, close, atr14, fvg_hit, gap_hit in candidates:
                 if is_accuracy_mode:
                     setup_label = "EMA200 + FVG Snapback" if fvg_hit else "EMA200 + RSI2 Dip"
                 elif is_winrate_mode:
@@ -342,96 +451,14 @@ def run_portfolio_backtest(
                 else:
                     setup_label = "EMA + SMC" if (fvg_hit or gap_hit) else "EMA Trend"
 
-                pending_signals[ticker] = {"bar_idx": bar_idx, "setup": setup_label}
-
-                entry_exec = close * (1.0 + slippage_pct)
-                if is_accuracy_mode:
-                    eff_sl_mult = min(sl_mult, 1.6)
-                    eff_tp_mult = max(tp_mult, 3.0)
-                elif is_winrate_mode:
-                    eff_sl_mult = max(sl_mult, 1.8)
-                    eff_tp_mult = min(tp_mult, 2.4)
-                else:
-                    eff_sl_mult = sl_mult
-                    eff_tp_mult = tp_mult
-
-                stop_loss = max(0.05, entry_exec - eff_sl_mult * atr14)
-                raw_target = entry_exec + eff_tp_mult * atr14
-                target = enforce_min_rr(entry_exec, stop_loss, raw_target, min_rr=risk_config.min_rr_ratio)
-
-                eff_cfg = RiskConfig(
-                    risk_per_trade_pct=0.015 if ((is_alpha_mode or is_winrate_mode) and (fvg_hit or gap_hit)) else risk_config.risk_per_trade_pct,
-                    max_stock_alloc_pct=risk_config.max_stock_alloc_pct,
-                    max_sector_alloc_pct=risk_config.max_sector_alloc_pct,
-                    max_portfolio_heat_pct=risk_config.max_portfolio_heat_pct,
-                    max_correlation=risk_config.max_correlation,
-                    kill_switch_dd_pct=risk_config.kill_switch_dd_pct,
-                )
-
-                approved, qty, reason = evaluate_trade_gate(
-                    ticker=ticker,
-                    entry_price=entry_exec,
-                    stop_loss=stop_loss,
-                    equity=equity,
-                    peak_equity=peak_equity,
-                    open_positions=open_positions,
-                    returns_df=returns_slice,
-                    current_prices=current_prices,
-                    config=eff_cfg,
-                    allow_fractional=allow_fractional,
-                )
-
-                if not approved:
-                    rejection_ledger.append(
-                        {
-                            "Date": dt.strftime("%Y-%m-%d"),
-                            "Ticker": ticker,
-                            "Sector": get_sector(ticker),
-                            "Setup": setup_label,
-                            "Price": round(close, 2),
-                            "RejectionReason": reason,
-                        }
-                    )
-                    continue
-
-                gross_cost = entry_exec * qty
-                total_cost = gross_cost * (1.0 + commission_pct)
-                if total_cost > cash:
-                    rejection_ledger.append(
-                        {
-                            "Date": dt.strftime("%Y-%m-%d"),
-                            "Ticker": ticker,
-                            "Sector": get_sector(ticker),
-                            "Setup": setup_label,
-                            "Price": round(close, 2),
-                            "RejectionReason": "Insufficient Cash",
-                        }
-                    )
-                    continue
-
-                cash -= total_cost
-                open_positions[ticker] = {
-                    "entry_date": dt,
-                    "entry_bar_idx": bar_idx,
-                    "entry": entry_exec,
-                    "stop_loss": stop_loss,
-                    "init_risk": max(0.01, entry_exec - stop_loss),
-                    "atr_entry": atr14,
-                    "highest_high": close,
-                    "trailed": False,
-                    "partial_taken": False,
-                    "realized_partial_pnl": 0.0,
-                    "target": target,
-                    "qty": qty,
-                    "orig_qty": qty,
-                    "cost_basis": total_cost,
-                    "orig_cost_basis": total_cost,
-                    "sector": get_sector(ticker),
+                pending_signals[ticker] = {
+                    "bar_idx": bar_idx,
                     "setup": setup_label,
-                    "last_price": close,
+                    "rs_val": rs_vs_nifty,
+                    "atr14": atr14,
+                    "fvg_hit": fvg_hit,
+                    "gap_hit": gap_hit,
                 }
-                pending_signals.pop(ticker, None)
-                current_prices[ticker] = close
 
         holdings_val = sum(
             current_prices.get(t, pos["last_price"]) * pos["qty"]
