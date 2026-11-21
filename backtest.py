@@ -79,6 +79,316 @@ def _precompute_smc_flags(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+
+
+def _compute_yearly_breakdown(eq_df: pd.DataFrame) -> pd.DataFrame:
+    """Compute calendar Year-by-Year Return % for Maddy AI vs Benchmark."""
+    if eq_df is None or eq_df.empty:
+        return pd.DataFrame()
+    df = eq_df[["Equity", "NiftyNorm"]].copy()
+    df["Year"] = df.index.year
+    rows = []
+    prev_eq = float(df["Equity"].iloc[0])
+    prev_bm = float(df["NiftyNorm"].iloc[0])
+    for yr, grp in df.groupby("Year"):
+        end_eq = float(grp["Equity"].iloc[-1])
+        end_bm = float(grp["NiftyNorm"].iloc[-1])
+        m_ret = ((end_eq - prev_eq) / prev_eq * 100.0) if prev_eq > 0 else 0.0
+        b_ret = ((end_bm - prev_bm) / prev_bm * 100.0) if prev_bm > 0 else 0.0
+        rows.append(
+            {
+                "Year": str(yr),
+                "Maddy_AI%": round(m_ret, 2),
+                "Benchmark%": round(b_ret, 2),
+                "Outperformance%": round(m_ret - b_ret, 2),
+            }
+        )
+        prev_eq = end_eq
+        prev_bm = end_bm
+    return pd.DataFrame(rows)
+
+
+def _run_top5_momentum_rotation(
+    stock_data: Dict[str, pd.DataFrame],
+    nifty_df: pd.DataFrame,
+    initial_capital: float = 100_000.0,
+    slippage_pct: float = 0.0010,
+    commission_pct: float = 0.0005,
+    allow_fractional: bool = False,
+    rebalance_days: int = 21,
+    top_n: int = 5,
+    emergency_stop_pct: float = 0.10,
+) -> Dict[str, Any]:
+    """
+    All-Weather Top-5 Momentum Rotation (Finalized Rules):
+      - 1B Smart Gold Shield: When Benchmark < EMA200, rotate 100% into Gold ETF (GOLDBEES.NS / GLD)
+        if Gold > EMA50, else 100% Cash Safe.
+      - 2A Monthly Rebalance (21 trading days, Next-Day Open): Hold Top-5 risk-adjusted 63D momentum
+        leaders above EMA50 at 20% equal weight.
+      - 3 Emergency Crash Stop-Loss (-10%): Checked daily on every open position to prevent sudden crash damage.
+    """
+    nifty = add_indicators(nifty_df)
+    nifty = nifty[~nifty.index.duplicated(keep="last")].sort_index()
+    enriched: Dict[str, pd.DataFrame] = {}
+    for t, df in stock_data.items():
+        ind = add_indicators(df)
+        if not ind.empty and len(ind) >= 70:
+            ind = ind[~ind.index.duplicated(keep="last")].sort_index()
+            ind["ROC63"] = ind["Close"].pct_change(63) * 100.0
+            ind["Vol20_Std"] = ind["Close"].pct_change().rolling(20).std().replace(0, np.nan)
+            enriched[t] = ind
+
+    if not enriched or len(nifty) < 70:
+        return {"error": "Need at least 70 daily bars for All-Weather Momentum Rotation."}
+
+    # Identify defensive Gold asset in current watchlist (NSE GOLDBEES.NS or Global GLD/GC=F)
+    gold_ticker = None
+    for cand in ("GOLDBEES.NS", "GLD", "GC=F"):
+        if cand in enriched:
+            gold_ticker = cand
+            break
+
+    common_dates = nifty.index[65:]
+    cash = float(initial_capital)
+    open_positions: Dict[str, dict] = {}
+    pending_target_tickers: List[str] = []
+    pending_is_gold_shield = False
+    should_rebalance_next_open = False
+
+    equity_records: List[Dict[str, Any]] = []
+    trade_log: List[Dict[str, Any]] = []
+
+    for bar_idx, dt in enumerate(common_dates):
+        # 1. Daily Mid-Month Emergency Crash Stop-Loss (-10%) Check
+        for t in list(open_positions.keys()):
+            if dt not in enriched[t].index:
+                continue
+            r_day = enriched[t].loc[dt]
+            if isinstance(r_day, pd.DataFrame):
+                r_day = r_day.iloc[-1]
+            low_px = safe_float(r_day["Low"])
+            pos = open_positions[t]
+            stop_px = pos["entry"] * (1.0 - emergency_stop_pct)
+            if low_px > 0 and low_px <= stop_px:
+                exec_px = stop_px * (1.0 - slippage_pct)
+                open_positions.pop(t)
+                net = exec_px * pos["qty"] * (1.0 - commission_pct)
+                cash += net
+                pnl = net - pos["cost_basis"]
+                pnl_pct = (pnl / pos["cost_basis"] * 100.0) if pos["cost_basis"] > 0 else 0.0
+                trade_log.append(
+                    {
+                        "Ticker": t,
+                        "Sector": pos["sector"],
+                        "Setup": pos["setup"],
+                        "EntryDate": pos["entry_date"].strftime("%Y-%m-%d"),
+                        "ExitDate": dt.strftime("%Y-%m-%d"),
+                        "Qty": pos["qty"],
+                        "Entry": round(pos["entry"], 2),
+                        "Exit": round(exec_px, 2),
+                        "PnL": round(pnl, 2),
+                        "Return%": round(pnl_pct, 2),
+                        "Reason": "Emergency -10% Stop",
+                    }
+                )
+
+        # 2. Execute Monthly Rebalance at TODAY'S OPEN
+        if should_rebalance_next_open:
+            for t in list(open_positions.keys()):
+                if t not in pending_target_tickers and dt in enriched[t].index:
+                    row_o = enriched[t].loc[dt]
+                    if isinstance(row_o, pd.DataFrame):
+                        row_o = row_o.iloc[-1]
+                    open_px = safe_float(row_o["Open"], default=open_positions[t]["last_price"])
+                    exec_px = open_px * (1.0 - slippage_pct)
+                    pos = open_positions.pop(t)
+                    net = exec_px * pos["qty"] * (1.0 - commission_pct)
+                    cash += net
+                    pnl = net - pos["cost_basis"]
+                    pnl_pct = (pnl / pos["cost_basis"] * 100.0) if pos["cost_basis"] > 0 else 0.0
+                    trade_log.append(
+                        {
+                            "Ticker": t,
+                            "Sector": pos["sector"],
+                            "Setup": pos["setup"],
+                            "EntryDate": pos["entry_date"].strftime("%Y-%m-%d"),
+                            "ExitDate": dt.strftime("%Y-%m-%d"),
+                            "Qty": pos["qty"],
+                            "Entry": round(pos["entry"], 2),
+                            "Exit": round(exec_px, 2),
+                            "PnL": round(pnl, 2),
+                            "Return%": round(pnl_pct, 2),
+                            "Reason": "Monthly Rebalance",
+                        }
+                    )
+
+            open_holdings = 0.0
+            for t, pos in open_positions.items():
+                if dt in enriched[t].index:
+                    r_o = enriched[t].loc[dt]
+                    if isinstance(r_o, pd.DataFrame):
+                        r_o = r_o.iloc[-1]
+                    open_holdings += safe_float(r_o["Open"], default=pos["last_price"]) * pos["qty"]
+                else:
+                    open_holdings += pos["last_price"] * pos["qty"]
+            eq_open = cash + open_holdings
+
+            n_slots = 1 if pending_is_gold_shield else top_n
+            target_alloc = eq_open * (1.0 / n_slots) * 0.98
+
+            for t in pending_target_tickers:
+                if t in open_positions or dt not in enriched[t].index:
+                    continue
+                r_o = enriched[t].loc[dt]
+                if isinstance(r_o, pd.DataFrame):
+                    r_o = r_o.iloc[-1]
+                open_px = safe_float(r_o["Open"])
+                close_px = safe_float(r_o["Close"])
+                if open_px <= 0:
+                    continue
+                exec_px = open_px * (1.0 + slippage_pct)
+                alloc = min(target_alloc, cash * 0.995)
+                if alloc <= 0:
+                    continue
+                raw_qty = alloc / (exec_px * (1.0 + commission_pct))
+                qty = round(raw_qty, 4) if allow_fractional else int(raw_qty)
+                if qty <= 0:
+                    continue
+                cost = exec_px * qty * (1.0 + commission_pct)
+                if cost > cash:
+                    continue
+                cash -= cost
+                open_positions[t] = {
+                    "entry_date": dt,
+                    "entry": exec_px,
+                    "qty": qty,
+                    "cost_basis": cost,
+                    "sector": get_sector(t),
+                    "setup": "Gold Bear Shield" if pending_is_gold_shield else "Top-5 Momentum Leader",
+                    "last_price": close_px,
+                }
+            should_rebalance_next_open = False
+
+        # 3. End-of-Day Mark-to-Market
+        holdings_val = 0.0
+        for t, pos in open_positions.items():
+            if dt in enriched[t].index:
+                r_c = enriched[t].loc[dt]
+                if isinstance(r_c, pd.DataFrame):
+                    r_c = r_c.iloc[-1]
+                pos["last_price"] = safe_float(r_c["Close"], default=pos["last_price"])
+            holdings_val += pos["last_price"] * pos["qty"]
+
+        n_row = nifty.loc[dt]
+        if isinstance(n_row, pd.DataFrame):
+            n_row = n_row.iloc[-1]
+        bench_close = safe_float(n_row["Close"])
+        bench_ema200 = safe_float(n_row["EMA200"], default=safe_float(n_row["EMA50"]))
+
+        equity_records.append(
+            {
+                "Date": dt,
+                "Equity": cash + holdings_val,
+                "NiftyClose": bench_close,
+            }
+        )
+
+        # 4. Every 21 trading days (Monthly): Evaluate Regime & Rank Top-5 Leaders for Next-Day Open
+        if bar_idx % rebalance_days == 0:
+            if bench_close < bench_ema200:
+                # 1B: Smart Gold Bear-Market Shield
+                if gold_ticker and dt in enriched[gold_ticker].index:
+                    rg = enriched[gold_ticker].loc[dt]
+                    if isinstance(rg, pd.DataFrame):
+                        rg = rg.iloc[-1]
+                    if safe_float(rg["Close"]) > safe_float(rg["EMA50"]):
+                        pending_target_tickers = [gold_ticker]
+                        pending_is_gold_shield = True
+                    else:
+                        pending_target_tickers = []
+                        pending_is_gold_shield = False
+                else:
+                    pending_target_tickers = []
+                    pending_is_gold_shield = False
+            else:
+                ranked = []
+                for t, df_t in enriched.items():
+                    if dt not in df_t.index:
+                        continue
+                    r = df_t.loc[dt]
+                    if isinstance(r, pd.DataFrame):
+                        r = r.iloc[-1]
+                    c = safe_float(r["Close"])
+                    e50 = safe_float(r["EMA50"])
+                    roc63 = safe_float(r["ROC63"])
+                    vol_s = safe_float(r["Vol20_Std"], default=0.02)
+                    if c > e50 and roc63 > 0 and vol_s > 0:
+                        ranked.append((roc63 / (vol_s * 100.0), t))
+                ranked.sort(key=lambda x: x[0], reverse=True)
+                pending_target_tickers = [t for _, t in ranked[:top_n]]
+                pending_is_gold_shield = False
+            should_rebalance_next_open = True
+
+    eq_df = pd.DataFrame(equity_records).set_index("Date")
+    eq_df["Peak"] = eq_df["Equity"].cummax()
+    eq_df["Drawdown%"] = (eq_df["Equity"] - eq_df["Peak"]) / eq_df["Peak"] * 100.0
+    eq_df["NiftyNorm"] = (eq_df["NiftyClose"] / eq_df["NiftyClose"].iloc[0]) * initial_capital
+
+    final_equity = safe_float(eq_df["Equity"].iloc[-1], default=initial_capital)
+    net_return_pct = ((final_equity - initial_capital) / initial_capital) * 100.0
+    n_years = max(len(eq_df) / 252.0, 0.25)
+    cagr_pct = (((final_equity / initial_capital) ** (1.0 / n_years)) - 1.0) * 100.0 if final_equity > 0 else -100.0
+    max_dd_pct = safe_float(eq_df["Drawdown%"].min())
+
+    trades_df = pd.DataFrame(trade_log)
+    if not trades_df.empty:
+        wins = trades_df[trades_df["PnL"] > 0]
+        losses = trades_df[trades_df["PnL"] <= 0]
+        win_rate = (len(wins) / len(trades_df)) * 100.0
+        gp = safe_float(wins["PnL"].sum())
+        gl = abs(safe_float(losses["PnL"].sum()))
+        avg_w = safe_float(wins["PnL"].mean()) if len(wins) > 0 else 0.0
+        avg_l = abs(safe_float(losses["PnL"].mean())) if len(losses) > 0 else 0.0
+        payoff = (avg_w / avg_l) if avg_l > 0 else (99.0 if avg_w > 0 else 0.0)
+        pf = (gp / gl) if gl > 0 else (99.0 if gp > 0 else 0.0)
+    else:
+        win_rate = pf = avg_w = avg_l = payoff = 0.0
+
+    port_ret = eq_df["Equity"].pct_change().dropna()
+    bench_ret = eq_df["NiftyClose"].pct_change().dropna()
+    aligned = pd.concat([port_ret, bench_ret], axis=1).dropna()
+    aligned.columns = ["port", "bench"]
+    if len(aligned) > 10 and aligned["bench"].var() > 0:
+        beta = safe_float(aligned["port"].cov(aligned["bench"]) / aligned["bench"].var())
+        rf_daily = 0.06 / 252.0
+        alpha_daily = (aligned["port"].mean() - rf_daily) - beta * (aligned["bench"].mean() - rf_daily)
+        alpha_annual_pct = safe_float(alpha_daily * 252.0 * 100.0)
+    else:
+        beta = alpha_annual_pct = 0.0
+
+    return {
+        "metrics": {
+            "InitialCapital": round(initial_capital, 2),
+            "FinalEquity": round(final_equity, 2),
+            "NetReturn%": round(net_return_pct, 2),
+            "CAGR%": round(cagr_pct, 2),
+            "MaxDrawdown%": round(max_dd_pct, 2),
+            "TotalTrades": int(len(trades_df)),
+            "WinRate%": round(win_rate, 2),
+            "ProfitFactor": round(pf, 2),
+            "PayoffRatio": round(payoff, 2),
+            "AvgWin": round(avg_w, 2),
+            "AvgLoss": round(avg_l, 2),
+            "Beta": round(beta, 2),
+            "Alpha%": round(alpha_annual_pct, 2),
+            "Rejections": 0,
+        },
+        "equity_curve": eq_df,
+        "trade_log": trades_df,
+        "rejection_ledger": pd.DataFrame(),
+        "yearly_breakdown": _compute_yearly_breakdown(eq_df),
+    }
+
 def run_portfolio_backtest(
     stock_data: Dict[str, pd.DataFrame],
     nifty_df: pd.DataFrame,
@@ -108,6 +418,15 @@ def run_portfolio_backtest(
         return {"error": "Missing stock or Nifty 50 data."}
 
     mode_str = str(strategy_mode)
+    if "Momentum Rotation" in mode_str:
+        return _run_top5_momentum_rotation(
+            stock_data=stock_data,
+            nifty_df=nifty_df,
+            initial_capital=initial_capital,
+            slippage_pct=slippage_pct,
+            commission_pct=commission_pct,
+            allow_fractional=allow_fractional,
+        )
     is_accuracy_mode = "High Accuracy" in mode_str
     is_winrate_mode = "High Win-Rate" in mode_str
     is_alpha_mode = "Alpha Growth" in mode_str
@@ -460,20 +779,17 @@ def run_portfolio_backtest(
                     bear_fvg_blk = bool(row["SMC_Bear_FVG_Overhead"])
                     sector_strong = get_sector(ticker) in strong_sectors
 
-                    # Rules 1, 2, 3, 5: Weekly Bullish + ADX>=20 + Top-30% Close + 1.2x Vol + Strong Sector + No Bear FVG Overhead
+                    # Clean 4-Rule Alpha Growth (avoids over-filtering idle cash)
                     trend_ok = (
                         weekly_bull
                         and close > ema20
                         and ema20 > ema50
-                        and ema_slope > 0.0
-                        and adx14 >= 20.0
+                        and adx14 >= 18.0
                         and (not bear_fvg_blk)
-                        and sector_strong
                         and atr14 > 0
                         and 0.8 <= atr_pct <= max_atr_pct
                     )
-                    inst_candle = candle_str >= 0.60 and vol_ratio >= 1.00
-                    if not (trend_ok and inst_candle and rs_vs_nifty > 0.0 and 48.0 <= rsi14 <= 70.0 and (dist_pct <= 4.0 or smc_boost)):
+                    if not (trend_ok and rs_vs_nifty > 0.0 and 45.0 <= rsi14 <= 72.0 and (dist_pct <= 4.5 or smc_boost)):
                         continue
                 else:
                     trend_ok = close > ema20 and ema20 > ema50 and atr14 > 0 and 0.8 <= atr_pct <= max_atr_pct
@@ -517,6 +833,8 @@ def run_portfolio_backtest(
 
     final_equity = safe_float(eq_df["Equity"].iloc[-1], default=initial_capital)
     net_return_pct = ((final_equity - initial_capital) / initial_capital) * 100.0
+    n_years = max(len(eq_df) / 252.0, 0.25)
+    cagr_pct = (((final_equity / initial_capital) ** (1.0 / n_years)) - 1.0) * 100.0 if final_equity > 0 else -100.0
     max_dd_pct = safe_float(eq_df["Drawdown%"].min())
 
     trades_df = pd.DataFrame(trade_log)
@@ -557,6 +875,7 @@ def run_portfolio_backtest(
         "InitialCapital": round(initial_capital, 2),
         "FinalEquity": round(final_equity, 2),
         "NetReturn%": round(net_return_pct, 2),
+        "CAGR%": round(cagr_pct, 2),
         "MaxDrawdown%": round(max_dd_pct, 2),
         "TotalTrades": int(len(trades_df)),
         "WinRate%": round(win_rate, 2),
@@ -574,6 +893,7 @@ def run_portfolio_backtest(
         "equity_curve": eq_df,
         "trade_log": trades_df,
         "rejection_ledger": rejections_df,
+        "yearly_breakdown": _compute_yearly_breakdown(eq_df),
     }
 
 

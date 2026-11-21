@@ -256,7 +256,7 @@ with st.sidebar:
     )
     strategy_mode = st.selectbox(
         "Strategy Engine Mode",
-        ["Alpha Growth (2.2:1 R:R + Chandelier Trail)", "High Accuracy (EMA200 + RSI2 Snapback)", "High Win-Rate (Pullback + Partial Lock)", "Balanced (Fixed TP)"],
+        ["Top-5 Momentum Rotation (Monthly Leaders)", "Alpha Growth (2.2:1 R:R + Chandelier Trail)", "High Accuracy (EMA200 + RSI2 Snapback)", "High Win-Rate (Pullback + Partial Lock)", "Balanced (Fixed TP)"],
         index=0,
         help="Alpha Growth filters for Nifty-outperforming RS Leaders, shifts SL to breakeven at +1.5R, and trails winners with a 2x ATR Chandelier stop.",
     )
@@ -614,7 +614,7 @@ with tab3:
     else:
         m = bt_results["metrics"]
         k1, k2, k3, k4, k5, k6 = st.columns(6)
-        k1.metric("Final Equity", f"{curr}{m['FinalEquity']:,.0f}", f"{m['NetReturn%']}%")
+        k1.metric("Final Equity", f"{curr}{m['FinalEquity']:,.0f}", f"{m['NetReturn%']}% ({m.get('CAGR%', 0)}%/yr)")
         k2.metric("Max Drawdown", f"{m['MaxDrawdown%']}%")
         k3.metric("Win Rate", f"{m['WinRate%']}%")
         k4.metric("Profit Factor", f"{m['ProfitFactor']}", f"Payoff {m.get('PayoffRatio', 0)}x")
@@ -646,6 +646,10 @@ with tab3:
         )
         fig_eq.update_layout(height=500, margin=dict(l=10, r=10, t=25, b=10), legend=dict(orientation="h", y=1.06))
         st.plotly_chart(fig_eq, width="stretch")
+
+        if "yearly_breakdown" in bt_results and not bt_results["yearly_breakdown"].empty:
+            st.subheader("Yearly Performance Breakdown (Maddy AI vs Benchmark)")
+            st.dataframe(bt_results["yearly_breakdown"], width="stretch", hide_index=True)
 
         c_tl, c_rj = st.columns(2)
         with c_tl:
