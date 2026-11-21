@@ -68,6 +68,23 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     minus_di = 100.0 * (pd.Series(minus_dm, index=out.index).ewm(alpha=1/14, min_periods=14, adjust=False).mean() / atr_safe)
     dx = 100.0 * ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan))
     out["ADX14"] = dx.ewm(alpha=1/14, min_periods=14, adjust=False).mean().fillna(0.0)
+
+    # Rule 2: Strong Candle Close (top 30% of range) + Volume Ratio
+    candle_rng = (high - low).replace(0, np.nan)
+    out["Candle_Strength"] = ((close - low) / candle_rng).fillna(0.5).clip(0.0, 1.0)
+    out["Vol_Ratio"] = np.where(out["Vol_MA20"] > 0, out["Volume"].astype(float) / out["Vol_MA20"], 1.0)
+
+    # Rule 1: Weekly Multi-Timeframe Filter (Weekly Close > Weekly EMA20, causal ffill)
+    try:
+        weekly_close = close.resample("W-FRI").last().dropna()
+        weekly_ema20 = weekly_close.ewm(span=20, adjust=False).mean()
+        w_bull = (weekly_close > weekly_ema20).reindex(out.index, method="ffill").astype("boolean").fillna(True).astype(bool)
+        out["Weekly_EMA20"] = weekly_ema20.reindex(out.index, method="ffill").fillna(out["EMA50"])
+        out["Weekly_Bullish"] = w_bull.astype(bool)
+    except Exception:
+        out["Weekly_EMA20"] = out["EMA50"]
+        out["Weekly_Bullish"] = True
+
     return out
 
 
@@ -340,10 +357,13 @@ def score_stock_snapshot(
             setup_tags.append("Bullish FVG Support")
             smc_tags.append(f"Bull FVG ({nearest['bottom']}–{nearest['top']})")
 
-    for z in reversed(bear_fvgs[-3:]):
-        if z["bottom"] * 0.99 <= close <= z["top"]:
-            score = max(0, score - 12)
-            smc_tags.append("Bearish FVG Overhead")
+    overhead_bear_fvg = False
+    for z in reversed(bear_fvgs[-4:]):
+        # Hard-block if inside a fresh Bearish FVG OR within 2% below its bottom edge
+        if (z["bottom"] <= close <= z["top"]) or (close < z["bottom"] <= close * 1.02):
+            score = max(0, score - 15)
+            overhead_bear_fvg = True
+            smc_tags.append(f"BLOCKED: Bear FVG ({z['bottom']}–{z['top']})")
             break
 
     recent_gaps = detect_market_gaps(enriched.tail(15), lookback=15)
@@ -366,15 +386,24 @@ def score_stock_snapshot(
 
     adx14 = safe_float(last.get("ADX14", 0.0))
     ema_slope = safe_float(last.get("EMA20_Slope", 0.0))
-    trend_strong = adx14 >= 20.0 and ema_slope > 0.0
+    candle_str = safe_float(last.get("Candle_Strength", 0.5))
+    vol_ratio = safe_float(last.get("Vol_Ratio", 1.0))
+    weekly_bull = bool(last.get("Weekly_Bullish", True))
+
+    trend_strong = adx14 >= 20.0 and ema_slope > 0.0 and weekly_bull
+    inst_candle = candle_str >= 0.60 and vol_ratio >= 1.00
+    hard_blocked = (adx14 < 20.0) or overhead_bear_fvg or (not weekly_bull)
 
     if not regime_bullish:
         status = "PAUSED (MACRO)"
         grade = "-"
-    elif score >= 85 and close > ema20 and atr14 > 0 and trend_strong:
+    elif hard_blocked:
+        status = "WATCH" if score >= 50 else "AVOID"
+        grade = "B" if status == "WATCH" else "C"
+    elif score >= 85 and close > ema20 and atr14 > 0 and trend_strong and inst_candle:
         status = "READY"
         grade = "A+"
-    elif score >= 75 and close > ema20 and atr14 > 0 and trend_strong:
+    elif score >= 75 and close > ema20 and atr14 > 0 and trend_strong and inst_candle:
         status = "READY"
         grade = "A"
     elif score >= 55:
@@ -425,7 +454,15 @@ def scan_watchlist(
     ]
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows).sort_values(by=["Score", "RS_vs_Bench"], ascending=[False, False]).reset_index(drop=True)
+    df_out = pd.DataFrame(rows)
+    # Rule 3: Top-Down Sector Filter (only allow READY if Sector Avg_RS% > 0)
+    sec_df = compute_sector_strength(df_out)
+    if not sec_df.empty:
+        weak_sectors = set(sec_df[sec_df["Avg_RS%"] <= 0.0]["Sector"].tolist())
+        mask_weak = (df_out["Status"] == "READY") & (df_out["Sector"].isin(weak_sectors))
+        df_out.loc[mask_weak, "Status"] = "WATCH (Weak Sector)"
+        df_out.loc[mask_weak, "Grade"] = "B"
+    return df_out.sort_values(by=["Score", "RS_vs_Bench"], ascending=[False, False]).reset_index(drop=True)
 
 
 def compute_sector_strength(scan_df: pd.DataFrame) -> pd.DataFrame:

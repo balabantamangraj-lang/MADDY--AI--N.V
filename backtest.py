@@ -57,8 +57,24 @@ def _precompute_smc_flags(df: pd.DataFrame) -> pd.DataFrame:
             if gp >= 0.010 and vr >= 1.3 and closes[i] >= opens[i]:
                 breakaway_gap[i] = True
 
+    bear_fvg_overhead = np.zeros(n, dtype=bool)
+    active_bear_fvgs: List[Tuple[float, float, int]] = []
+    for i in range(2, n):
+        atr_ref = atrs[i - 1] if atrs[i - 1] > 0 else (closes[i - 1] * 0.01)
+        if highs[i] < lows[i - 2] and (lows[i - 2] - highs[i]) >= (0.30 * atr_ref):
+            active_bear_fvgs.append((highs[i], lows[i - 2], i))
+        still_b = []
+        for b_bot, b_top, born in active_bear_fvgs:
+            if i - born > 25 or highs[i] >= b_top:
+                continue
+            if (b_bot <= closes[i] <= b_top) or (closes[i] < b_bot <= closes[i] * 1.02):
+                bear_fvg_overhead[i] = True
+            still_b.append((b_bot, b_top, born))
+        active_bear_fvgs = still_b[-5:]
+
     out["SMC_FVG_Hit"] = fvg_support
     out["SMC_Breakaway_Gap"] = breakaway_gap
+    out["SMC_Bear_FVG_Overhead"] = bear_fvg_overhead
     out["PrevClose"] = out["Close"].shift(1)
     return out
 
@@ -146,12 +162,13 @@ def run_portfolio_backtest(
             pos["last_price"] = close
             pos["highest_high"] = max(pos["highest_high"], high)
 
-            # High Win-Rate Partial Profit Lock at +1.0R (sells 50% & moves SL to Breakeven)
-            if is_winrate_mode and (not pos["partial_taken"]) and pos["qty"] >= 2:
+            # Rule 4: +1.0R 50% Partial Profit + Breakeven Lock (Alpha Growth & High Win-Rate)
+            min_split_qty = 0.0002 if allow_fractional else 2
+            if is_winrate_mode and (not pos["partial_taken"]) and pos["qty"] >= min_split_qty:
                 partial_target = pos["entry"] + 1.0 * pos["init_risk"]
                 if high >= partial_target:
-                    sell_qty = pos["qty"] // 2
-                    rem_qty = pos["qty"] - sell_qty
+                    sell_qty = round(pos["qty"] * 0.5, 4) if allow_fractional else (int(pos["qty"]) // 2)
+                    rem_qty = round(pos["qty"] - sell_qty, 4) if allow_fractional else (int(pos["qty"]) - sell_qty)
                     exec_px = partial_target * (1.0 - slippage_pct)
                     gross = exec_px * sell_qty
                     net = gross * (1.0 - commission_pct)
@@ -383,6 +400,19 @@ def run_portfolio_backtest(
 
         # 4. End-of-Day Signal Scan -> Queued for NEXT-DAY OPEN Execution
         if nifty_bullish:
+            # Rule 3: Compute cross-sectional Sector Avg RS% on day dt
+            sec_rs_buckets: Dict[str, List[float]] = {}
+            for t_sec, df_sec in enriched.items():
+                if dt in df_sec.index:
+                    r_sec = df_sec.loc[dt]
+                    if isinstance(r_sec, pd.DataFrame):
+                        r_sec = r_sec.iloc[-1]
+                    sec_name = get_sector(t_sec)
+                    sec_rs_buckets.setdefault(sec_name, []).append(safe_float(r_sec["ROC20"]) - nifty_roc20)
+            strong_sectors = {
+                sec for sec, vals in sec_rs_buckets.items() if vals and (sum(vals) / len(vals)) > 0.0
+            }
+
             for ticker, df_t in enriched.items():
                 if ticker in open_positions or ticker in pending_signals or dt not in df_t.index:
                     continue
@@ -424,18 +454,26 @@ def run_portfolio_backtest(
                 elif is_alpha_mode:
                     adx14 = safe_float(row["ADX14"], default=0.0)
                     ema_slope = safe_float(row["EMA20_Slope"], default=0.0)
-                    vol_now = safe_float(row["Volume"], default=0.0)
-                    vol_avg = safe_float(row["Vol_MA20"], default=1.0)
+                    candle_str = safe_float(row["Candle_Strength"], default=0.5)
+                    vol_ratio = safe_float(row["Vol_Ratio"], default=1.0)
+                    weekly_bull = bool(row["Weekly_Bullish"])
+                    bear_fvg_blk = bool(row["SMC_Bear_FVG_Overhead"])
+                    sector_strong = get_sector(ticker) in strong_sectors
+
+                    # Rules 1, 2, 3, 5: Weekly Bullish + ADX>=20 + Top-30% Close + 1.2x Vol + Strong Sector + No Bear FVG Overhead
                     trend_ok = (
-                        close > ema20
+                        weekly_bull
+                        and close > ema20
                         and ema20 > ema50
                         and ema_slope > 0.0
                         and adx14 >= 20.0
+                        and (not bear_fvg_blk)
+                        and sector_strong
                         and atr14 > 0
                         and 0.8 <= atr_pct <= max_atr_pct
                     )
-                    vol_or_smc = (vol_avg > 0 and vol_now >= vol_avg) or smc_boost
-                    if not (trend_ok and rs_vs_nifty > 0.0 and 50.0 <= rsi14 <= 68.0 and (dist_pct <= 3.5 or smc_boost) and vol_or_smc):
+                    inst_candle = candle_str >= 0.60 and vol_ratio >= 1.00
+                    if not (trend_ok and inst_candle and rs_vs_nifty > 0.0 and 48.0 <= rsi14 <= 70.0 and (dist_pct <= 4.0 or smc_boost)):
                         continue
                 else:
                     trend_ok = close > ema20 and ema20 > ema50 and atr14 > 0 and 0.8 <= atr_pct <= max_atr_pct
