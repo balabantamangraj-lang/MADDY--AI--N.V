@@ -185,7 +185,7 @@ with st.sidebar:
     )
     strategy_mode = st.selectbox(
         "Strategy Engine Mode",
-        ["High Win-Rate (Pullback + Partial Lock)", "Alpha Growth (Trail + RS Leaders)", "Balanced (Fixed TP)"],
+        ["Alpha Growth (2.2:1 R:R + Chandelier Trail)", "High Win-Rate (Pullback + Partial Lock)", "Balanced (Fixed TP)"],
         index=0,
         help="Alpha Growth filters for Nifty-outperforming RS Leaders, shifts SL to breakeven at +1.5R, and trails winners with a 2x ATR Chandelier stop.",
     )
@@ -484,7 +484,7 @@ with tab3:
         k1.metric("Final Equity", f"₹{m['FinalEquity']:,.0f}", f"{m['NetReturn%']}%")
         k2.metric("Max Drawdown", f"{m['MaxDrawdown%']}%")
         k3.metric("Win Rate", f"{m['WinRate%']}%")
-        k4.metric("Profit Factor", f"{m['ProfitFactor']}")
+        k4.metric("Profit Factor", f"{m['ProfitFactor']}", f"Payoff {m.get('PayoffRatio', 0)}x")
         k5.metric("CAPM Alpha", f"{m['Alpha%']}%")
         k6.metric("Beta", f"{m['Beta']}")
 

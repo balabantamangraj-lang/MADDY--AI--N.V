@@ -50,6 +50,18 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     rs = np.where(avg_loss > 0, avg_gain / avg_loss, 100.0)
     out["RSI14"] = 100.0 - (100.0 / (1.0 + rs))
     out["ROC20"] = close.pct_change(20) * 100.0
+    out["EMA20_Slope"] = out["EMA20"].diff(5)
+
+    # ADX14 (Chop / Trend-Strength Filter — avoids flat sideways markets)
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    atr_safe = out["ATR14"].replace(0, np.nan)
+    plus_di = 100.0 * (pd.Series(plus_dm, index=out.index).ewm(alpha=1/14, min_periods=14, adjust=False).mean() / atr_safe)
+    minus_di = 100.0 * (pd.Series(minus_dm, index=out.index).ewm(alpha=1/14, min_periods=14, adjust=False).mean() / atr_safe)
+    dx = 100.0 * ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan))
+    out["ADX14"] = dx.ewm(alpha=1/14, min_periods=14, adjust=False).mean().fillna(0.0)
     return out
 
 

@@ -72,7 +72,7 @@ def run_portfolio_backtest(
     slippage_pct: float = 0.0010,
     commission_pct: float = 0.0005,
     stale_signal_bars: int = 3,
-    strategy_mode: str = "High Win-Rate (Pullback + Partial Lock)",
+    strategy_mode: str = "Alpha Growth (2.2:1 R:R + Chandelier Trail)",
     risk_config: RiskConfig = RiskConfig(),
 ) -> Dict[str, Any]:
     """
@@ -286,8 +286,21 @@ def run_portfolio_backtest(
                     if not (uptrend and near_value and green_bounce and healthy_rsi):
                         continue
                 elif is_alpha_mode:
-                    trend_ok = close > ema20 and ema20 > ema50 and atr14 > 0 and 0.8 <= atr_pct <= 4.5
-                    if not (trend_ok and rs_vs_nifty > 0.0 and 48.0 <= rsi14 <= 72.0 and (dist_pct <= 4.0 or smc_boost)):
+                    adx14 = safe_float(row["ADX14"], default=0.0)
+                    ema_slope = safe_float(row["EMA20_Slope"], default=0.0)
+                    vol_now = safe_float(row["Volume"], default=0.0)
+                    vol_avg = safe_float(row["Vol_MA20"], default=1.0)
+                    trend_ok = (
+                        close > ema20
+                        and ema20 > ema50
+                        and ema_slope > 0.0
+                        and adx14 >= 20.0
+                        and atr14 > 0
+                        and 0.8 <= atr_pct <= 4.5
+                    )
+                    # Strict Confluence Score check (>= 75 equivalent: Leader + Trend + Momentum + Volume/SMC)
+                    vol_or_smc = (vol_avg > 0 and vol_now >= vol_avg) or smc_boost
+                    if not (trend_ok and rs_vs_nifty > 0.0 and 50.0 <= rsi14 <= 68.0 and (dist_pct <= 3.5 or smc_boost) and vol_or_smc):
                         continue
                 else:
                     trend_ok = close > ema20 and ema20 > ema50 and atr14 > 0 and 0.8 <= atr_pct <= 4.5
@@ -418,10 +431,16 @@ def run_portfolio_backtest(
         win_rate = (len(wins) / len(trades_df)) * 100.0
         gross_profit = safe_float(wins["PnL"].sum())
         gross_loss = abs(safe_float(losses["PnL"].sum()))
+        avg_win = safe_float(wins["PnL"].mean()) if len(wins) > 0 else 0.0
+        avg_loss = abs(safe_float(losses["PnL"].mean())) if len(losses) > 0 else 0.0
+        payoff_ratio = (avg_win / avg_loss) if avg_loss > 0 else (99.0 if avg_win > 0 else 0.0)
         profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (99.0 if gross_profit > 0 else 0.0)
     else:
         win_rate = 0.0
         profit_factor = 0.0
+        avg_win = 0.0
+        avg_loss = 0.0
+        payoff_ratio = 0.0
 
     port_ret = eq_df["Equity"].pct_change().dropna()
     bench_ret = eq_df["NiftyClose"].pct_change().dropna()
@@ -445,6 +464,9 @@ def run_portfolio_backtest(
         "TotalTrades": int(len(trades_df)),
         "WinRate%": round(win_rate, 2),
         "ProfitFactor": round(profit_factor, 2),
+        "PayoffRatio": round(payoff_ratio, 2),
+        "AvgWin": round(avg_win, 2),
+        "AvgLoss": round(avg_loss, 2),
         "Beta": round(beta, 2),
         "Alpha%": round(alpha_annual_pct, 2),
         "Rejections": int(len(rejections_df)),
@@ -462,7 +484,7 @@ def run_parameter_heatmap(
     stock_data: Dict[str, pd.DataFrame],
     nifty_df: pd.DataFrame,
     initial_capital: float = 100_000.0,
-    strategy_mode: str = "High Win-Rate (Pullback + Partial Lock)",
+    strategy_mode: str = "Alpha Growth (2.2:1 R:R + Chandelier Trail)",
     sl_grid: List[float] = None,
     tp_grid: List[float] = None,
 ) -> pd.DataFrame:
@@ -490,7 +512,7 @@ def run_walk_forward_validation(
     stock_data: Dict[str, pd.DataFrame],
     nifty_df: pd.DataFrame,
     initial_capital: float = 100_000.0,
-    strategy_mode: str = "High Win-Rate (Pullback + Partial Lock)",
+    strategy_mode: str = "Alpha Growth (2.2:1 R:R + Chandelier Trail)",
     n_splits: int = 3,
 ) -> pd.DataFrame:
     """Rolling Walk-Forward Optimization (In-Sample -> Unseen Out-of-Sample)."""

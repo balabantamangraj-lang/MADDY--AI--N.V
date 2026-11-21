@@ -31,8 +31,8 @@ class RiskConfig:
     max_correlation: float = 0.80
     kill_switch_dd_pct: float = 0.25
     min_rr_ratio: float = 2.2              # Lock minimum 2.2:1 Reward-to-Risk
-    be_trigger_r: float = 1.2              # Shift SL to Break-Even at +1.2R
-    chandelier_atr_mult: float = 2.0       # Chandelier Trailing Stop distance
+    be_trigger_r: float = 1.5              # Shift SL to Break-Even at +1.2R
+    chandelier_atr_mult: float = 2.2       # Chandelier Trailing Stop distance
 
 
 def enforce_min_rr(
