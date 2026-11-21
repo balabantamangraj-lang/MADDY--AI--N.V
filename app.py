@@ -5,6 +5,7 @@ Deploy free from your phone via GitHub + Streamlit Community Cloud!
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
@@ -143,9 +144,10 @@ def reset_paper_db() -> None:
 # ============================================================================
 # Page Setup & Mobile-Friendly Styling
 # ============================================================================
+_LOGO_FILE = "logo.png" if os.path.exists("logo.png") else "📈"
 st.set_page_config(
     page_title="Maddy AI — Personal Quant Terminal",
-    page_icon="📈",
+    page_icon=_LOGO_FILE,
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -223,7 +225,12 @@ with st.sidebar:
 # ============================================================================
 # Header & Data Load
 # ============================================================================
-st.title("Maddy AI — Personal Quant Terminal")
+if os.path.exists("logo.png"):
+    c_logo, c_ttl = st.columns([1, 8])
+    c_logo.image("logo.png", width=64)
+    c_ttl.title("Maddy AI — Personal Quant Terminal")
+else:
+    st.title("Maddy AI — Personal Quant Terminal")
 ist_time = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%d %b %Y · %I:%M %p IST")
 st.caption(f"Dual-Engine White-Box Quant Terminal · NSE / Nifty 50 · Updated: {ist_time}")
 
