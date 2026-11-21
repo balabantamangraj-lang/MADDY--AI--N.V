@@ -134,8 +134,9 @@ def _run_top5_momentum_rotation(
         ind = add_indicators(df)
         if not ind.empty and len(ind) >= 70:
             ind = ind[~ind.index.duplicated(keep="last")].sort_index()
-            ind["ROC63"] = ind["Close"].pct_change(63) * 100.0
-            ind["Vol20_Std"] = ind["Close"].pct_change().rolling(20).std().replace(0, np.nan)
+            ind["ROC126"] = ind["Close"].pct_change(126) * 100.0
+            ind["ROC252"] = ind["Close"].pct_change(252) * 100.0
+            ind["Vol60_Std"] = ind["Close"].pct_change().rolling(60, min_periods=20).std().replace(0, np.nan)
             enriched[t] = ind
 
     if not enriched or len(nifty) < 70:
@@ -148,7 +149,8 @@ def _run_top5_momentum_rotation(
             gold_ticker = cand
             break
 
-    common_dates = nifty.index[65:]
+    warmup = 130 if len(nifty) > 160 else 65
+    common_dates = nifty.index[warmup:]
     cash = float(initial_capital)
     open_positions: Dict[str, dict] = {}
     pending_target_tickers: List[str] = []
@@ -233,8 +235,7 @@ def _run_top5_momentum_rotation(
                     open_holdings += pos["last_price"] * pos["qty"]
             eq_open = cash + open_holdings
 
-            n_slots = 1 if pending_is_gold_shield else top_n
-            target_alloc = eq_open * (1.0 / n_slots) * 0.98
+            target_alloc = (eq_open * 0.50) if pending_is_gold_shield else (eq_open * (1.0 / top_n) * 0.98)
 
             for t in pending_target_tickers:
                 if t in open_positions or dt not in enriched[t].index:
@@ -283,7 +284,7 @@ def _run_top5_momentum_rotation(
         if isinstance(n_row, pd.DataFrame):
             n_row = n_row.iloc[-1]
         bench_close = safe_float(n_row["Close"])
-        bench_ema200 = safe_float(n_row["EMA200"], default=safe_float(n_row["EMA50"]))
+        bench_ema50 = safe_float(n_row["EMA50"])
 
         equity_records.append(
             {
@@ -293,10 +294,10 @@ def _run_top5_momentum_rotation(
             }
         )
 
-        # 4. Every 21 trading days (Monthly): Evaluate Regime & Rank Top-5 Leaders for Next-Day Open
+        # 4. Every 21 trading days (Monthly): Fast EMA50 Shield + 6M/12M Blended Momentum
         if bar_idx % rebalance_days == 0:
-            if bench_close < bench_ema200:
-                # 1B: Smart Gold Bear-Market Shield
+            if bench_close < bench_ema50:
+                # Fast EMA50 Bear Shield: 50% Gold ETF (if Gold > EMA50) + 50% Cash
                 if gold_ticker and dt in enriched[gold_ticker].index:
                     rg = enriched[gold_ticker].loc[dt]
                     if isinstance(rg, pd.DataFrame):
@@ -320,10 +321,12 @@ def _run_top5_momentum_rotation(
                         r = r.iloc[-1]
                     c = safe_float(r["Close"])
                     e50 = safe_float(r["EMA50"])
-                    roc63 = safe_float(r["ROC63"])
-                    vol_s = safe_float(r["Vol20_Std"], default=0.02)
-                    if c > e50 and roc63 > 0 and vol_s > 0:
-                        ranked.append((roc63 / (vol_s * 100.0), t))
+                    roc6m = safe_float(r["ROC126"])
+                    roc12m = safe_float(r["ROC252"], default=roc6m)
+                    blended_mom = 0.5 * roc6m + 0.5 * roc12m
+                    vol_s = safe_float(r["Vol60_Std"], default=0.02)
+                    if c > e50 and blended_mom > 0 and vol_s > 0:
+                        ranked.append((blended_mom / (vol_s * 100.0), t))
                 ranked.sort(key=lambda x: x[0], reverse=True)
                 pending_target_tickers = [t for _, t in ranked[:top_n]]
                 pending_is_gold_shield = False
