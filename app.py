@@ -16,6 +16,8 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from alerts import format_signal_message, send_telegram_alert
+from journal_sync import is_cloud_sync_configured, pull_journal_from_github, push_journal_to_github
+from news_shield import get_news_shield
 from backtest import (
     run_parameter_heatmap,
     run_portfolio_backtest,
@@ -48,6 +50,7 @@ from scanner import (
     check_nifty_regime,
     detect_fvg_zones,
     detect_market_gaps,
+    compute_sector_strength,
     scan_watchlist,
 )
 
@@ -143,6 +146,28 @@ def reset_paper_db() -> None:
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM paper_trades")
         conn.commit()
+
+
+def restore_paper_trades_from_df(df: pd.DataFrame) -> int:
+    init_paper_db()
+    if df is None or df.empty:
+        return 0
+    cols = [
+        "ticker", "sector", "setup", "entry_date", "entry_price",
+        "stop_loss", "target", "qty", "status", "exit_date", "exit_price", "realized_pnl",
+    ]
+    valid = [c for c in cols if c in df.columns]
+    if not {"ticker", "entry_price", "qty"}.issubset(set(valid)):
+        return 0
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM paper_trades")
+        placeholders = ",".join(["?"] * len(valid))
+        col_sql = ",".join(valid)
+        for _, r in df.iterrows():
+            vals = [None if pd.isna(r[c]) else r[c] for c in valid]
+            conn.execute(f"INSERT INTO paper_trades ({col_sql}) VALUES ({placeholders})", vals)
+        conn.commit()
+    return len(df)
 
 
 # ============================================================================
@@ -350,6 +375,29 @@ with tab1:
         st.subheader("Live Signal Table")
         st.dataframe(scan_df, use_container_width=True, hide_index=True)
 
+        # Upgrade #2: Sector Strength Radar (Top-Down Filter)
+        sec_df = compute_sector_strength(scan_df)
+        if not sec_df.empty:
+            with st.expander("Sector Strength Radar (Top-Down Market Leaders)", expanded=True):
+                bar_colors = ["#10b981" if v >= 0 else "#ef4444" for v in sec_df["Avg_RS%"]]
+                fig_sec = go.Figure(
+                    go.Bar(
+                        x=sec_df["Avg_RS%"],
+                        y=sec_df["Sector"],
+                        orientation="h",
+                        marker_color=bar_colors,
+                        text=[f"{v:+.2f}% ({ldr})" for v, ldr in zip(sec_df["Avg_RS%"], sec_df["Top_Leader"])],
+                        textposition="auto",
+                    )
+                )
+                fig_sec.update_layout(
+                    height=max(240, 34 * len(sec_df)),
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    xaxis_title=f"Avg 20D Relative Strength vs {bench_name} (%)",
+                    yaxis=dict(autorange="reversed"),
+                )
+                st.plotly_chart(fig_sec, use_container_width=True)
+
         ready_df = scan_df[scan_df["Status"] == "READY"]
         st.subheader(f"Exact Trade Cards ({len(ready_df)} READY)")
 
@@ -534,6 +582,28 @@ with tab2:
                 use_container_width=True,
                 hide_index=True,
             )
+
+    # Upgrade #4: News & Earnings Risk Shield
+    with st.expander(f"News & Earnings Risk Shield — {selected_ticker}", expanded=False):
+        if use_demo_mode:
+            st.caption("Turn off Offline Demo Data Mode to load live headlines & earnings dates.")
+        else:
+            ns = get_news_shield(selected_ticker)
+            if ns["earnings_warning"]:
+                st.warning(f"Upcoming Earnings Alert ({ns['earnings_date']}) — watch for overnight gap risk!")
+            elif ns["earnings_date"]:
+                st.info(f"Next Earnings Date: {ns['earnings_date']}")
+            if ns["caution_count"] > 0:
+                st.warning(f"{ns['caution_count']} headline(s) flagged with CAUTION keywords — check before entering.")
+            if ns["headlines"]:
+                for h in ns["headlines"]:
+                    badge = "🔴" if h["tag"] == "CAUTION" else ("🟢" if h["tag"] == "POSITIVE" else "⚪")
+                    if h["link"]:
+                        st.markdown(f"{badge} **[{h['title']}]({h['link']})** — _{h['publisher']}_")
+                    else:
+                        st.markdown(f"{badge} **{h['title']}** — _{h['publisher']}_")
+            else:
+                st.caption("No recent headlines returned for this ticker right now.")
 
 # ----------------------------------------------------------------------------
 # TAB 3: PORTFOLIO BACKTEST & ANALYTICS
@@ -740,7 +810,7 @@ with tab5:
                 st.rerun()
 
     # Closed Trades + CSV Backup + Reset
-    with st.expander(f"Closed Paper Trades ({len(closed_df)}) & Backup"):
+    with st.expander(f"Closed Paper Trades ({len(closed_df)}) & Permanent Cloud Journal"):
         if not closed_df.empty:
             st.dataframe(closed_df, use_container_width=True, hide_index=True)
         if not paper_df.empty:
@@ -750,6 +820,31 @@ with tab5:
                 file_name="maddy_ai_paper_trades.csv",
                 mime="text/csv",
             )
+        st.divider()
+        st.markdown("**Permanent Cloud Journal (Survives Reboots)**")
+        c_sync1, c_sync2 = st.columns(2)
+        if c_sync1.button("Save Journal to GitHub Cloud", use_container_width=True):
+            ok_s, msg_s = push_journal_to_github(paper_df)
+            st.success(msg_s) if ok_s else st.info(msg_s)
+        if c_sync2.button("Restore from GitHub Cloud", use_container_width=True):
+            cloud_df, msg_c = pull_journal_from_github()
+            if cloud_df is not None:
+                n_rest = restore_paper_trades_from_df(cloud_df)
+                st.success(f"{msg_c} ({n_rest} trades loaded)")
+                st.rerun()
+            else:
+                st.info(msg_c)
+
+        uploaded_csv = st.file_uploader("Or Restore from Saved CSV Backup", type=["csv"], key="restore_csv")
+        if uploaded_csv is not None:
+            try:
+                imp_df = pd.read_csv(uploaded_csv)
+                n_imp = restore_paper_trades_from_df(imp_df)
+                st.success(f"Restored {n_imp} trades from CSV!")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not read CSV: {exc}")
+
         if st.button("Reset Paper Portfolio"):
             reset_paper_db()
             st.rerun()

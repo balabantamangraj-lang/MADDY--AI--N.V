@@ -422,3 +422,22 @@ def scan_watchlist(
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows).sort_values(by=["Score", "RS_vs_Bench"], ascending=[False, False]).reset_index(drop=True)
+
+
+def compute_sector_strength(scan_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate average RS_vs_Bench, average Score, and Top Leader per Sector."""
+    if scan_df is None or scan_df.empty or "Sector" not in scan_df.columns:
+        return pd.DataFrame()
+    rows = []
+    for sector, grp in scan_df.groupby("Sector"):
+        top_row = grp.sort_values(by=["RS_vs_Bench", "Score"], ascending=[False, False]).iloc[0]
+        rows.append(
+            {
+                "Sector": sector,
+                "Avg_RS%": round(float(grp["RS_vs_Bench"].mean()), 2),
+                "Avg_Score": round(float(grp["Score"].mean()), 1),
+                "Assets": int(len(grp)),
+                "Top_Leader": str(top_row["Ticker"]),
+            }
+        )
+    return pd.DataFrame(rows).sort_values(by="Avg_RS%", ascending=False).reset_index(drop=True)
