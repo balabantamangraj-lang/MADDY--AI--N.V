@@ -1,4 +1,3 @@
-```python
 """
 data_feed.py — Safe market data loader & Broker API Bridge for Maddy AI.
 Features:
@@ -300,4 +299,3 @@ class BrokerBridge:
             "product": "CNC",
             "dry_run": not self.is_configured,
         }
-```

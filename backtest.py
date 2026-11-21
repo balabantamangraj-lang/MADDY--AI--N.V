@@ -180,7 +180,7 @@ def run_portfolio_backtest(
                     exit_reason = "Trailing Stop"
                 else:
                     exit_reason = "Stop-Loss"
-            elif is_accuracy_mode and bars_held >= 1 and close > pos["entry"] * (1.0 + 2 * (slippage_pct + commission_pct)) and (close >= high5_now or rsi2_now >= 75.0):
+            elif is_accuracy_mode and bars_held >= 1 and close >= (pos["entry"] + 1.0 * pos["init_risk"]) and (close >= high5_now or rsi2_now >= 75.0):
                 exit_price = close * (1.0 - slippage_pct)
                 exit_reason = "Snapback Profit"
             elif is_accuracy_mode and bars_held >= 12:
@@ -344,7 +344,7 @@ def run_portfolio_backtest(
 
                 entry_exec = close * (1.0 + slippage_pct)
                 if is_accuracy_mode:
-                    eff_sl_mult = max(sl_mult, 2.5)
+                    eff_sl_mult = min(sl_mult, 1.6)
                     eff_tp_mult = max(tp_mult, 3.0)
                 elif is_winrate_mode:
                     eff_sl_mult = max(sl_mult, 1.8)
