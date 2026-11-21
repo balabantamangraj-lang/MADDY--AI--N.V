@@ -75,6 +75,7 @@ def run_portfolio_backtest(
     strategy_mode: str = "Alpha Growth (2.2:1 R:R + Chandelier Trail)",
     risk_config: RiskConfig = RiskConfig(),
     max_atr_pct: float = 4.5,
+    allow_fractional: bool = False,
 ) -> Dict[str, Any]:
     """
     Run multi-asset portfolio backtest across 3 white-box engine modes:
@@ -377,6 +378,7 @@ def run_portfolio_backtest(
                     returns_df=returns_slice,
                     current_prices=current_prices,
                     config=eff_cfg,
+                    allow_fractional=allow_fractional,
                 )
 
                 if not approved:
@@ -518,6 +520,7 @@ def run_parameter_heatmap(
     sl_grid: List[float] = None,
     tp_grid: List[float] = None,
     max_atr_pct: float = 4.5,
+    allow_fractional: bool = False,
 ) -> pd.DataFrame:
     """Evaluate Net Return % across a grid of SL x TP ATR multipliers."""
     sl_vals = sl_grid or [1.5, 1.8, 2.0, 2.5]
@@ -534,6 +537,7 @@ def run_parameter_heatmap(
                 tp_mult=t,
                 strategy_mode=strategy_mode,
                 max_atr_pct=max_atr_pct,
+                allow_fractional=allow_fractional,
             )
             ret = res["metrics"]["NetReturn%"] if "metrics" in res else 0.0
             matrix.loc[f"SL {s:.1f}x", f"TP {t:.1f}x"] = round(float(ret), 2)
@@ -547,6 +551,7 @@ def run_walk_forward_validation(
     strategy_mode: str = "High Accuracy (EMA200 + RSI2 Snapback)",
     n_splits: int = 3,
     max_atr_pct: float = 4.5,
+    allow_fractional: bool = False,
 ) -> pd.DataFrame:
     """Rolling Walk-Forward Optimization (In-Sample -> Unseen Out-of-Sample)."""
     if nifty_df is None or len(nifty_df) < 180:
@@ -580,7 +585,7 @@ def run_walk_forward_validation(
         for sl_m, tp_m in candidate_pairs:
             res_is = run_portfolio_backtest(
                 is_stocks, is_nifty, initial_capital=initial_capital,
-                sl_mult=sl_m, tp_mult=tp_m, strategy_mode=strategy_mode, max_atr_pct=max_atr_pct,
+                sl_mult=sl_m, tp_mult=tp_m, strategy_mode=strategy_mode, max_atr_pct=max_atr_pct, allow_fractional=allow_fractional,
             )
             if "metrics" in res_is and res_is["metrics"]["NetReturn%"] > best_is_ret:
                 best_is_ret = res_is["metrics"]["NetReturn%"]
@@ -588,7 +593,7 @@ def run_walk_forward_validation(
 
         res_oos = run_portfolio_backtest(
             oos_stocks, oos_nifty, initial_capital=initial_capital,
-            sl_mult=best_pair[0], tp_mult=best_pair[1], strategy_mode=strategy_mode, max_atr_pct=max_atr_pct,
+            sl_mult=best_pair[0], tp_mult=best_pair[1], strategy_mode=strategy_mode, max_atr_pct=max_atr_pct, allow_fractional=allow_fractional,
         )
         oos_m = res_oos.get("metrics", {})
 

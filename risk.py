@@ -85,16 +85,20 @@ def calculate_position_size(
     entry_price: float,
     stop_loss: float,
     config: RiskConfig = RiskConfig(),
-) -> int:
-    """Whole share quantity respecting 1% risk and 20% single-stock cap."""
+    allow_fractional: bool = False,
+) -> float:
+    """Position size respecting 1% risk and 20% single-asset cap (whole shares for NSE, fractional for Crypto)."""
     if equity <= 0 or entry_price <= 0 or stop_loss >= entry_price:
         return 0
-    risk_per_share = entry_price - stop_loss
-    if risk_per_share <= 0:
+    risk_per_unit = entry_price - stop_loss
+    if risk_per_unit <= 0:
         return 0
-    qty_risk = math.floor((equity * config.risk_per_trade_pct) / risk_per_share)
-    qty_cap = math.floor((equity * config.max_stock_alloc_pct) / entry_price)
-    return int(max(0, min(qty_risk, qty_cap)))
+    raw_risk = (equity * config.risk_per_trade_pct) / risk_per_unit
+    raw_cap = (equity * config.max_stock_alloc_pct) / entry_price
+    qty = max(0.0, min(raw_risk, raw_cap))
+    if allow_fractional:
+        return round(qty, 4) if qty >= 0.0001 else 0.0
+    return int(math.floor(qty))
 
 
 def compute_portfolio_heat(open_positions: Dict[str, dict], equity: float) -> float:
@@ -102,7 +106,7 @@ def compute_portfolio_heat(open_positions: Dict[str, dict], equity: float) -> fl
     if equity <= 0 or not open_positions:
         return 0.0
     total_risk = sum(
-        max(0.0, (safe_float(p["entry"]) - safe_float(p["stop_loss"])) * int(p["qty"]))
+        max(0.0, (safe_float(p["entry"]) - safe_float(p["stop_loss"])) * float(p["qty"]))
         for p in open_positions.values()
     )
     return total_risk / equity
@@ -120,7 +124,7 @@ def compute_sector_exposure(
     for ticker, pos in open_positions.items():
         sector = pos.get("sector") or get_sector(ticker)
         px = safe_float(current_prices.get(ticker)) if current_prices and ticker in current_prices else safe_float(pos["entry"])
-        sector_vals[sector] = sector_vals.get(sector, 0.0) + px * int(pos["qty"])
+        sector_vals[sector] = sector_vals.get(sector, 0.0) + px * float(pos["qty"])
     return {sec: val / equity for sec, val in sector_vals.items()}
 
 
@@ -164,7 +168,8 @@ def evaluate_trade_gate(
     returns_df: Optional[pd.DataFrame] = None,
     current_prices: Optional[Dict[str, float]] = None,
     config: RiskConfig = RiskConfig(),
-) -> Tuple[bool, int, str]:
+    allow_fractional: bool = False,
+) -> Tuple[bool, float, str]:
     """Master 5-Rule Institutional Risk Gate + Kill-Switch."""
     if ticker in open_positions:
         return False, 0, "Already in Position"
@@ -174,7 +179,7 @@ def evaluate_trade_gate(
         if dd >= config.kill_switch_dd_pct:
             return False, 0, f"Kill-Switch Active (DD {dd*100:.1f}% >= {config.kill_switch_dd_pct*100:.0f}%)"
 
-    qty = calculate_position_size(equity, entry_price, stop_loss, config)
+    qty = calculate_position_size(equity, entry_price, stop_loss, config, allow_fractional=allow_fractional)
     if qty <= 0:
         return False, 0, "Position Size Zero"
 

@@ -24,7 +24,9 @@ from backtest import (
 from data_feed import (
     BENCHMARK_TICKER,
     CRYPTO_BENCHMARK,
+    DEFAULT_COMMODITIES_GLOBAL_WATCHLIST,
     DEFAULT_CRYPTO_WATCHLIST,
+    GLOBAL_BENCHMARK,
     DEFAULT_WATCHLIST,
     BrokerBridge,
     fetch_ohlcv,
@@ -190,25 +192,42 @@ with st.sidebar:
         value=False,
         help="Instant synthetic NSE-style candles if live yfinance is slow or unavailable.",
     )
-    market_mode = st.radio(
-        "Market Mode",
-        ["NSE Stocks (₹)", "Crypto 24/7 ($)"],
+    market_mode = st.selectbox(
+        "Market Mode (Multi-Asset Radar)",
+        ["NSE Stocks + Metals (₹)", "Crypto 24/7 ($)", "Commodities & Global ($)"],
         index=0,
-        horizontal=True,
     )
     is_crypto = "Crypto" in market_mode
-    curr = "$" if is_crypto else "₹"
-    bench_ticker = CRYPTO_BENCHMARK if is_crypto else BENCHMARK_TICKER
-    bench_name = "Bitcoin (BTC-USD)" if is_crypto else "Nifty 50"
-    max_atr_pct = 12.0 if is_crypto else 4.5
-    default_wl = DEFAULT_CRYPTO_WATCHLIST if is_crypto else DEFAULT_WATCHLIST
+    is_global = "Commodities" in market_mode
+    allow_frac = is_crypto or is_global
+    curr = "$" if (is_crypto or is_global) else "₹"
+
+    if is_crypto:
+        bench_ticker = CRYPTO_BENCHMARK
+        bench_name = "Bitcoin (BTC-USD)"
+        max_atr_pct = 12.0
+        default_wl = DEFAULT_CRYPTO_WATCHLIST
+        def_cap = 1_000
+    elif is_global:
+        bench_ticker = GLOBAL_BENCHMARK
+        bench_name = "S&P 500 (SPY)"
+        max_atr_pct = 6.5
+        default_wl = DEFAULT_COMMODITIES_GLOBAL_WATCHLIST
+        def_cap = 5_000
+    else:
+        bench_ticker = BENCHMARK_TICKER
+        bench_name = "Nifty 50"
+        max_atr_pct = 4.5
+        default_wl = DEFAULT_WATCHLIST
+        def_cap = 100_000
 
     capital = st.number_input(
         f"Portfolio Capital ({curr})",
-        min_value=100 if is_crypto else 10_000,
+        min_value=100 if allow_frac else 10_000,
         max_value=50_000_000,
-        value=1_000 if is_crypto else 100_000,
-        step=500 if is_crypto else 10_000,
+        value=def_cap,
+        step=500 if allow_frac else 10_000,
+        key=f"cap_{market_mode}",
     )
     strategy_mode = st.selectbox(
         "Strategy Engine Mode",
@@ -221,7 +240,7 @@ with st.sidebar:
     period = st.selectbox("Backtest Window", ["1y", "2y", "3y"], index=2)
 
     watchlist_text = st.text_area(
-        f"{'Crypto' if is_crypto else 'NSE'} Watchlist (1 ticker per line)",
+        f"{market_mode.split(' (')[0]} Watchlist (1 ticker per line)",
         value="\n".join(default_wl),
         height=170,
         key=f"wl_{market_mode}",
@@ -282,6 +301,7 @@ bt_results = run_portfolio_backtest(
     strategy_mode=strategy_mode,
     risk_config=risk_cfg,
     max_atr_pct=max_atr_pct,
+    allow_fractional=allow_frac,
 )
 
 # ============================================================================
@@ -321,7 +341,7 @@ with tab1:
 
     if not scan_df.empty:
         scan_df["Qty (1% Risk)"] = scan_df.apply(
-            lambda r: calculate_position_size(float(capital), r["Entry"], r["StopLoss"], risk_cfg)
+            lambda r: calculate_position_size(float(capital), r["Entry"], r["StopLoss"], risk_cfg, allow_fractional=allow_frac)
             if r["Status"] == "READY"
             else 0,
             axis=1,
@@ -609,8 +629,8 @@ with tab4:
     st.subheader("2. Parameter Stability Heatmap & Walk-Forward Optimization (WFO)")
     if st.button("Run Heatmap + Walk-Forward Validation", type="primary"):
         with st.spinner("Running SL x TP stability grid & WFO splits..."):
-            hm_df = run_parameter_heatmap(stock_data, nifty_df, initial_capital=float(capital), strategy_mode=strategy_mode, max_atr_pct=max_atr_pct)
-            wfo_df = run_walk_forward_validation(stock_data, nifty_df, initial_capital=float(capital), strategy_mode=strategy_mode, n_splits=3, max_atr_pct=max_atr_pct)
+            hm_df = run_parameter_heatmap(stock_data, nifty_df, initial_capital=float(capital), strategy_mode=strategy_mode, max_atr_pct=max_atr_pct, allow_fractional=allow_frac)
+            wfo_df = run_walk_forward_validation(stock_data, nifty_df, initial_capital=float(capital), strategy_mode=strategy_mode, n_splits=3, max_atr_pct=max_atr_pct, allow_fractional=allow_frac)
 
         fig_hm = go.Figure(
             data=go.Heatmap(

@@ -29,6 +29,7 @@ except ImportError:
 
 BENCHMARK_TICKER = "^NSEI"
 CRYPTO_BENCHMARK = "BTC-USD"
+GLOBAL_BENCHMARK = "SPY"
 
 DEFAULT_WATCHLIST: List[str] = [
     "RELIANCE.NS",
@@ -51,6 +52,8 @@ DEFAULT_WATCHLIST: List[str] = [
     "DRREDDY.NS",
     "BEL.NS",
     "NTPC.NS",
+    "GOLDBEES.NS",
+    "SILVERBEES.NS",
 ]
 
 DEFAULT_CRYPTO_WATCHLIST: List[str] = [
@@ -64,6 +67,17 @@ DEFAULT_CRYPTO_WATCHLIST: List[str] = [
     "LINK-USD",
     "DOGE-USD",
     "SUI-USD",
+]
+
+DEFAULT_COMMODITIES_GLOBAL_WATCHLIST: List[str] = [
+    "GC=F",
+    "SI=F",
+    "CL=F",
+    "HG=F",
+    "GLD",
+    "SLV",
+    "SPY",
+    "QQQ",
 ]
 
 SECTOR_MAP: Dict[str, str] = {
@@ -102,6 +116,16 @@ SECTOR_MAP: Dict[str, str] = {
     "XRP-USD": "Payments",
     "LINK-USD": "Oracle/DeFi",
     "DOGE-USD": "Meme",
+    "GOLDBEES.NS": "Precious Metals",
+    "SILVERBEES.NS": "Precious Metals",
+    "GC=F": "Precious Metals",
+    "SI=F": "Precious Metals",
+    "GLD": "Precious Metals",
+    "SLV": "Precious Metals",
+    "CL=F": "Energy",
+    "HG=F": "Industrial Metals",
+    "SPY": "US Index",
+    "QQQ": "US Tech",
 }
 
 
