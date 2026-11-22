@@ -125,6 +125,16 @@ SECTOR_MAP: Dict[str, str] = {
     "CL=F": "Energy",
     "HG=F": "Industrial Metals",
     "SPY": "US Index",
+    "TRENT.NS": "Consumer",
+    "HAL.NS": "Defence",
+    "DIXON.NS": "Electronics",
+    "PERSISTENT.NS": "IT",
+    "TVSMOTOR.NS": "Auto",
+    "INDIGO.NS": "Aviation",
+    "CHOLAFIN.NS": "Finance",
+    "CGPOWER.NS": "Capital Goods",
+    "CUMMINSIND.NS": "Capital Goods",
+    "POWERGRID.NS": "Power",
     "QQQ": "US Tech",
 }
 

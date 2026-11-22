@@ -413,6 +413,7 @@ def run_portfolio_backtest(
     risk_config: RiskConfig = RiskConfig(),
     max_atr_pct: float = 4.5,
     allow_fractional: bool = False,
+    top_n: int = 5,
 ) -> Dict[str, Any]:
     """
     Run multi-asset portfolio backtest across 3 white-box engine modes:
@@ -437,6 +438,7 @@ def run_portfolio_backtest(
             slippage_pct=slippage_pct,
             commission_pct=commission_pct,
             allow_fractional=allow_fractional,
+            top_n=top_n,
         )
     is_accuracy_mode = "High Accuracy" in mode_str
     is_winrate_mode = "High Win-Rate" in mode_str

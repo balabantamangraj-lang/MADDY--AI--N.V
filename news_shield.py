@@ -45,7 +45,8 @@ def _fetch_news_and_earnings_raw(ticker: str) -> Dict[str, Any]:
         "ticker": ticker,
         "headlines": [],
         "caution_count": 0,
-        "earnings_date": None,
+        "last_earnings_date": None,
+        "next_earnings_date": None,
         "earnings_warning": False,
     }
     if yf is None:
@@ -73,23 +74,40 @@ def _fetch_news_and_earnings_raw(ticker: str) -> Dict[str, Any]:
             headlines.append({"title": title, "publisher": publisher, "link": link, "tag": tag})
         result["headlines"] = headlines[:4]
 
-        # 2. Upcoming Earnings Date check (equities only)
+        # 2. Last & Next Earnings Date check (equities only)
         if "-USD" not in ticker and "=F" not in ticker:
+            now_utc = datetime.now(timezone.utc).date()
+            parsed_dates = []
             cal = getattr(tk, "calendar", None)
             if isinstance(cal, dict) and "Earnings Date" in cal:
                 ed = cal["Earnings Date"]
-                if isinstance(ed, (list, tuple)) and ed:
-                    ed = ed[0]
-                if ed is not None:
-                    ed_str = str(ed)[:10]
-                    result["earnings_date"] = ed_str
-                    try:
-                        ed_dt = datetime.strptime(ed_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-                        days_away = (ed_dt - datetime.now(timezone.utc)).days
-                        if 0 <= days_away <= 10:
-                            result["earnings_warning"] = True
-                    except Exception:
-                        pass
+                ed_list = list(ed) if isinstance(ed, (list, tuple)) else [ed]
+                for item in ed_list:
+                    if item is not None:
+                        try:
+                            parsed_dates.append(datetime.strptime(str(item)[:10], "%Y-%m-%d").date())
+                        except Exception:
+                            pass
+            try:
+                ed_df = getattr(tk, "earnings_dates", None)
+                if ed_df is not None and not ed_df.empty:
+                    for idx_dt in ed_df.index[:8]:
+                        try:
+                            parsed_dates.append(idx_dt.date())
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            past = sorted({d for d in parsed_dates if d < now_utc})
+            future = sorted({d for d in parsed_dates if d >= now_utc})
+            if past:
+                result["last_earnings_date"] = past[-1].strftime("%Y-%m-%d")
+            if future:
+                nxt = future[0]
+                result["next_earnings_date"] = nxt.strftime("%Y-%m-%d")
+                if 0 <= (nxt - now_utc).days <= 10:
+                    result["earnings_warning"] = True
     except Exception:
         pass
 

@@ -185,7 +185,7 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-      .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
+      .block-container { padding-top: 0.6rem; padding-bottom: 2rem; }
       div[data-testid="stMetric"] {
         background: rgba(148, 163, 184, 0.08);
         border: 1px solid rgba(148, 163, 184, 0.22);
@@ -261,6 +261,17 @@ with st.sidebar:
         index=0,
         help="Alpha Growth filters for Nifty-outperforming RS Leaders, shifts SL to breakeven at +1.5R, and trails winners with a 2x ATR Chandelier stop.",
     )
+    risk_per_trade_pct = st.slider(
+        "Risk per Trade (%)",
+        0.5, 2.5, 1.0, 0.25,
+        help="Higher risk proportionally scales stock cap (up to 30%) and portfolio heat (up to 10%) while keeping the 25% Kill-Switch active.",
+    )
+    top_n_choice = st.selectbox(
+        "Rotation Concentration (Top-N)",
+        ["Top 5 (Balanced · 20% each)", "Top 3 (High Growth · 33% each)"],
+        index=0,
+    )
+    top_n_val = 3 if "Top 3" in top_n_choice else 5
     sl_mult = st.slider("Stop-Loss ATR Multiplier", 1.0, 3.0, 2.0, 0.1)
     tp_mult = st.slider("Take-Profit ATR Multiplier", 1.5, 6.0, 3.5, 0.25)
     period = st.selectbox("Backtest Window", ["1y", "2y", "3y"], index=2)
@@ -286,12 +297,7 @@ with st.sidebar:
 # ============================================================================
 # Header & Data Load
 # ============================================================================
-if os.path.exists("logo.png"):
-    c_logo, c_ttl = st.columns([1, 8])
-    c_logo.image("logo.png", width=64)
-    c_ttl.title("Maddy AI — Personal Quant Terminal")
-else:
-    st.title("Maddy AI — Personal Quant Terminal")
+
 ist_time = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%d %b %Y · %I:%M %p IST")
 st.caption(f"Dual-Engine White-Box Quant Terminal · {market_mode} · Benchmark: {bench_name} · Updated: {ist_time}")
 
@@ -315,7 +321,13 @@ if nifty_df.empty or not stock_data:
     st.stop()
 
 regime = check_nifty_regime(nifty_df)
-risk_cfg = RiskConfig()
+eff_stock_cap = min(0.30, 0.20 + max(0.0, risk_per_trade_pct - 1.0) * 0.08)
+eff_heat_cap = min(0.10, max(0.05, (risk_per_trade_pct * 4.0) / 100.0))
+risk_cfg = RiskConfig(
+    risk_per_trade_pct=risk_per_trade_pct / 100.0,
+    max_stock_alloc_pct=eff_stock_cap,
+    max_portfolio_heat_pct=eff_heat_cap,
+)
 
 # Run backtest once per parameter set so Tab 2, Tab 3, Tab 4 share grounded results
 bt_results = run_portfolio_backtest(
@@ -328,19 +340,14 @@ bt_results = run_portfolio_backtest(
     risk_config=risk_cfg,
     max_atr_pct=max_atr_pct,
     allow_fractional=allow_frac,
+    top_n=top_n_val,
 )
 
 # ============================================================================
 # 5-Tab Dashboard Layout
 # ============================================================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    [
-        "1. Live Command Center",
-        "2. Smart Charts",
-        "3. Backtest & Analytics",
-        "4. Stress Testing Lab",
-        "5. Paper Trade & Risk",
-    ]
+    ["🎯 Scan", "📊 Chart", "📈 Test", "🧪 Lab", "💼 Paper"]
 )
 
 # ----------------------------------------------------------------------------
@@ -364,14 +371,14 @@ with tab1:
         allow_fractional=allow_frac,
     )
     with st.container(border=True):
-        st.subheader("This Month's Top-5 Portfolio Action Plan")
+        st.subheader(f"This Month's Top-{top_n_val} Portfolio Action Plan")
         if top5_plan["shield_active"]:
             st.warning(f"**Status:** {top5_plan['mode']}")
         else:
             st.success(f"**Status:** {top5_plan['mode']}")
         if not top5_plan["table"].empty:
             st.dataframe(top5_plan["table"], width="stretch", hide_index=True)
-            st.caption(f"Monthly Rebalance Guide: Allocate {curr}{float(capital)*0.20:,.0f} (20%) per leader · Daily Emergency Stop at -10%.")
+            st.caption(f"Monthly Rebalance Guide: Allocate {curr}{float(capital)*(1.0/top_n_val):,.0f} ({int(100/top_n_val)}%) per leader · Daily Emergency Stop at -10%.")
         else:
             st.info("No active Top-5 allocations right now — keep capital protected in Cash.")
 
@@ -432,9 +439,12 @@ with tab1:
                         st.markdown(f"### {row['Ticker']} · {row['Score']}/100")
                         st.caption(f"{row['Sector']} · {row['Setup']}")
                         st.metric("Entry Price", f"{curr}{row['Entry']:,.2f}")
-                        st.write(f"**ATR Stop-Loss:** {curr}{row['StopLoss']:,.2f}")
-                        st.write(f"**Target:** {curr}{row['Target']:,.2f}")
-                        st.write(f"**1% Risk Qty:** `{qty}` {'units' if allow_frac else 'shares'}")
+                        pos_cost = qty * float(row['Entry'])
+                        max_risk_amt = qty * max(0.0, float(row['Entry']) - float(row['StopLoss']))
+                        est_reward_amt = qty * max(0.0, float(row['Target']) - float(row['Entry']))
+                        st.write(f"**ATR Stop-Loss:** {curr}{row['StopLoss']:,.2f} · **Target:** {curr}{row['Target']:,.2f}")
+                        st.write(f"**{risk_per_trade_pct:.2f}% Risk Qty:** `{qty}` {'units' if allow_frac else 'shares'} (Cost: **{curr}{pos_cost:,.0f}**)")
+                        st.caption(f"Max Risk: {curr}{max_risk_amt:,.0f} · Est. Reward: {curr}{est_reward_amt:,.0f}")
 
                         b1, b2 = st.columns(2)
                         if b1.button("Paper Buy", key=f"pb_{row['Ticker']}", width="stretch"):
@@ -740,10 +750,12 @@ with tab2:
             st.caption("Turn off Offline Demo Data Mode to load live headlines & earnings dates.")
         else:
             ns = get_news_shield(selected_ticker)
-            if ns["earnings_warning"]:
-                st.warning(f"Upcoming Earnings Alert ({ns['earnings_date']}) — watch for overnight gap risk!")
-            elif ns["earnings_date"]:
-                st.info(f"Next Earnings Date: {ns['earnings_date']}")
+            last_ed = ns.get("last_earnings_date") or "N/A"
+            next_ed = ns.get("next_earnings_date") or "TBA"
+            if ns.get("earnings_warning"):
+                st.warning(f"Upcoming Earnings Alert — **Next:** {next_ed} | **Last:** {last_ed} (watch for gap risk!)")
+            else:
+                st.info(f"**Last Earnings:** {last_ed} &nbsp;·&nbsp; **Next Earnings:** {next_ed}")
             if ns["caution_count"] > 0:
                 st.warning(f"{ns['caution_count']} headline(s) flagged with CAUTION keywords — check before entering.")
             if ns["headlines"]:
