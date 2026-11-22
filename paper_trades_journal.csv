@@ -1,0 +1,2 @@
+id,ticker,sector,setup,entry_date,entry_price,stop_loss,target,qty,status,exit_date,exit_price,realized_pnl
+1,M&M.NS,Auto,EMA20 Trend + RS Leader + Bullish FVG 50% Test + Breakaway Gap & Go,2026-11-22 13:58,3545.0,3339.33,3997.48,4.0,OPEN,,,0.0
