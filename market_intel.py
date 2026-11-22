@@ -73,26 +73,34 @@ def compute_market_mood(
     use_demo_mode: bool = False,
 ) -> Dict[str, Any]:
     """
-    Compute 0-100 Market Mood Index (Fear & Greed):
-      1. Breadth (% above EMA50) — 40% weight
-      2. Benchmark Momentum (Close vs EMA50 + 20D ROC) — 35% weight
-      3. Volatility / India VIX — 25% weight
+    Tickertape-inspired 4-Zone Market Mood Index (0-100):
+      1. Market Breadth (% above EMA50) — 35%
+      2. Benchmark Momentum (Close vs EMA50 + 20D ROC) — 30%
+      3. Volatility / India VIX — 20%
+      4. Safe-Haven Gold Demand (Gold vs Benchmark 14D return) — 15%
+    Zones:
+      0-30  : Extreme Fear (Oversold / Opportunity)
+      30-50 : Fear (Cautious)
+      50-70 : Greed (Bullish Trend)
+      70-100: Extreme Greed (Overheated — Avoid Chasing)
     """
     breadth = compute_market_breadth(stock_data)
-    breadth_score = float(breadth["pct_ema50"])  # 0-100
+    breadth_score = float(breadth["pct_ema50"])
 
-    # Benchmark momentum score (0-100)
+    # 2. Benchmark Momentum (0-100)
     mom_score = 50.0
+    b_roc14 = 0.0
     b_ind = add_indicators(bench_df)
     if not b_ind.empty and len(b_ind) >= 50:
         b_last = b_ind.iloc[-1]
         b_close = safe_float(b_last["Close"])
         b_e50 = safe_float(b_last["EMA50"], default=b_close)
         b_roc20 = safe_float(b_last["ROC20"])
+        b_roc14 = safe_float(b_ind["Close"].pct_change(14).iloc[-1]) * 100.0
         dist_50 = ((b_close - b_e50) / b_e50 * 100.0) if b_e50 > 0 else 0.0
         mom_score = float(np.clip(50.0 + dist_50 * 4.0 + b_roc20 * 2.5, 5.0, 95.0))
 
-    # Volatility / VIX score (low VIX -> Greed/higher score, high VIX -> Fear/lower score)
+    # 3. Volatility / India VIX (0-100)
     vol_score = 55.0
     vix_val = None
     if is_nse and not use_demo_mode:
@@ -100,7 +108,6 @@ def compute_market_mood(
             vix_df = fetch_ohlcv("^INDIAVIX", period="3mo")
             if not vix_df.empty:
                 vix_val = round(safe_float(vix_df["Close"].iloc[-1]), 2)
-                # India VIX ~12 -> calm/greed (~80), VIX ~25+ -> high fear (~15)
                 vol_score = float(np.clip(100.0 - ((vix_val - 10.0) * 5.0), 10.0, 95.0))
         except Exception:
             vix_val = None
@@ -108,28 +115,38 @@ def compute_market_mood(
         atr_pct = safe_float(b_ind["ATR_Pct"].iloc[-1], default=1.2)
         vol_score = float(np.clip(85.0 - atr_pct * 15.0, 15.0, 90.0))
 
-    mood_score = int(round(np.clip(0.40 * breadth_score + 0.35 * mom_score + 0.25 * vol_score, 0, 100)))
+    # 4. Gold Safe-Haven Demand (if Gold beats Benchmark -> Fear; if Equities beat Gold -> Greed)
+    gold_score = 50.0
+    gold_rel = None
+    for gt in ("GOLDBEES.NS", "GLD", "GC=F"):
+        if gt in stock_data and len(stock_data[gt]) >= 16:
+            g_roc14 = safe_float(stock_data[gt]["Close"].pct_change(14).iloc[-1]) * 100.0
+            gold_rel = round(g_roc14 - b_roc14, 2)
+            # Positive gold_rel = investors rushing to Gold (Fear -> lower MMI score)
+            gold_score = float(np.clip(50.0 - gold_rel * 4.0, 10.0, 90.0))
+            break
 
-    if mood_score < 25:
+    mood_score = int(round(np.clip(
+        0.35 * breadth_score + 0.30 * mom_score + 0.20 * vol_score + 0.15 * gold_score,
+        0, 100,
+    )))
+
+    if mood_score < 30:
         zone = "Extreme Fear"
-        color = "#ef5350"
-        tip = "Bazaar mein zyada darr hai — jaldbazi mat karo, sirf A+ quality setups par nazar rakho."
-    elif mood_score < 45:
-        zone = "Fear"
-        color = "#ff9800"
-        tip = "Market cautious hai — defensive sizing aur Bear Shield par dhyan rakho."
-    elif mood_score <= 55:
-        zone = "Neutral"
-        color = "#94a3b8"
-        tip = "Balanced mood — sirf strong RS leaders aur clean FVG setups follow karo."
-    elif mood_score <= 75:
-        zone = "Greed"
         color = "#26a69a"
-        tip = "Healthy bullish trend — Chandelier trailing stops ke saath winners ride karo."
+        tip = "Bazaar mein zyada darr (oversold) hai — achi quality leaders par dip-buying ka mauka ban sakta hai."
+    elif mood_score < 50:
+        zone = "Fear"
+        color = "#facc15"
+        tip = "Market thoda dara hua hai — chhote size aur Bear Shield ke saath selective raho."
+    elif mood_score < 70:
+        zone = "Greed"
+        color = "#fb923c"
+        tip = "Healthy bullish momentum — Top-5 leaders aur trailing stop-loss ke saath trend ride karo."
     else:
         zone = "Extreme Greed"
-        color = "#00e676"
-        tip = "Bazaar garam (overheated) hai — naya breakout chase mat karo, trailing stop tight rakho."
+        color = "#ef5350"
+        tip = "Bazaar overheated (zyada garam) hai — naye breakouts chase mat karo, profit protect rakho."
 
     return {
         "score": mood_score,
@@ -137,6 +154,8 @@ def compute_market_mood(
         "color": color,
         "tip": tip,
         "vix": vix_val,
+        "gold_rel": gold_rel,
+        "mom_score": int(round(mom_score)),
         "breadth": breadth,
     }
 

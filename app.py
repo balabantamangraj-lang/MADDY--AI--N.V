@@ -18,7 +18,7 @@ import streamlit.components.v1 as components
 from alerts import format_signal_message, send_telegram_alert
 from journal_sync import is_cloud_sync_configured, pull_journal_from_github, push_journal_to_github
 from market_intel import compute_market_mood, get_company_health
-from news_shield import get_news_shield
+from news_shield import fetch_market_news_feed, get_news_shield
 from backtest import (
     get_current_top5_allocation,
     run_parameter_heatmap,
@@ -89,6 +89,8 @@ def init_paper_db() -> None:
 
 def load_paper_trades() -> pd.DataFrame:
     init_paper_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        return pd.read_sql_query("SELECT * FROM paper_trades ORDER BY id DESC", conn)
 
 
 def style_tradingview(fig: go.Figure, height: int = 440, right_axis: bool = True, show_crosshair: bool = True) -> go.Figure:
@@ -129,8 +131,7 @@ def style_tradingview(fig: go.Figure, height: int = 440, right_axis: bool = True
         fig.update_xaxes(gridcolor="#1e222d", linecolor="#2a2e39")
         fig.update_yaxes(gridcolor="#1e222d", linecolor="#2a2e39")
     return fig
-    with sqlite3.connect(DB_PATH) as conn:
-        return pd.read_sql_query("SELECT * FROM paper_trades ORDER BY id DESC", conn)
+
 
 
 def add_paper_trade(
@@ -387,8 +388,8 @@ bt_results = run_portfolio_backtest(
 # ============================================================================
 # 5-Tab Dashboard Layout
 # ============================================================================
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["🎯 Scan", "📊 Chart", "📈 Test", "🧪 Lab", "💼 Paper"]
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    ["🎯 Scan", "📊 Chart", "📈 Test", "🧪 Lab", "💼 Paper", "📰 News"]
 )
 
 # ----------------------------------------------------------------------------
@@ -412,49 +413,65 @@ with tab1:
         use_demo_mode=use_demo_mode,
     )
     br = mood["breadth"]
-    m_col1, m_col2 = st.columns([1.2, 1])
+    # Tickertape-Style Semi-Circle Market Mood Index (MMI) Card
+    import math as _math
+    _sc = mood["score"]
+    _angle_deg = 180.0 - (_sc / 100.0) * 180.0
+    _rad = _math.radians(_angle_deg)
+    _nx = 150 + 82 * _math.cos(_rad)
+    _ny = 140 - 82 * _math.sin(_rad)
+    _vix_pill = f"India VIX: <b>{mood['vix']}</b>" if mood.get("vix") else "Vol: <b>Active</b>"
+    _gold_pill = f"Gold vs Bench: <b>{mood['gold_rel']:+.1f}%</b>" if mood.get("gold_rel") is not None else "Gold: <b>N/A</b>"
+
+    m_col1, m_col2 = st.columns([1.25, 1])
     with m_col1:
-        fig_mood = go.Figure(
-            go.Indicator(
-                mode="gauge+number",
-                value=mood["score"],
-                title={"text": f"Market Mood: {mood['zone']}", "font": {"size": 14, "color": "#e2e8f0"}},
-                number={"font": {"size": 28, "color": mood["color"]}},
-                gauge={
-                    "axis": {"range": [0, 100], "tickcolor": "#787b86"},
-                    "bar": {"color": mood["color"]},
-                    "bgcolor": "#1e222d",
-                    "steps": [
-                        {"range": [0, 25], "color": "rgba(239,83,80,0.22)"},
-                        {"range": [25, 45], "color": "rgba(255,152,0,0.18)"},
-                        {"range": [45, 55], "color": "rgba(148,163,184,0.14)"},
-                        {"range": [55, 75], "color": "rgba(38,166,154,0.20)"},
-                        {"range": [75, 100], "color": "rgba(0,230,118,0.24)"},
-                    ],
-                },
-            )
+        st.markdown(
+            f"""
+            <div style="background:#131722;border:1px solid #2a2e39;border-radius:14px;padding:14px 16px;color:#e2e8f0;font-family:Inter,sans-serif;">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                <span style="font-size:13px;font-weight:700;letter-spacing:0.3px;color:#ffffff;">MARKET MOOD INDEX (MMI)</span>
+                <span style="font-size:11px;font-weight:700;padding:3px 10px;border-radius:999px;background:{mood['color']}22;color:{mood['color']};border:1px solid {mood['color']}66;">{mood['zone']}</span>
+              </div>
+              <div style="text-align:center;">
+                <svg viewBox="0 0 300 162" style="width:100%;max-width:290px;height:auto;">
+                  <!-- 4 Tickertape Color Arcs: Extreme Fear (Green) -> Fear (Yellow) -> Greed (Orange) -> Extreme Greed (Red) -->
+                  <path d="M 40 140 A 110 110 0 0 1 85.3 51.0" fill="none" stroke="#26a69a" stroke-width="18" stroke-linecap="butt"/>
+                  <path d="M 88.5 48.8 A 110 110 0 0 1 148.0 30.0" fill="none" stroke="#facc15" stroke-width="18" stroke-linecap="butt"/>
+                  <path d="M 152.0 30.0 A 110 110 0 0 1 211.5 48.8" fill="none" stroke="#fb923c" stroke-width="18" stroke-linecap="butt"/>
+                  <path d="M 214.7 51.0 A 110 110 0 0 1 260 140" fill="none" stroke="#ef5350" stroke-width="18" stroke-linecap="butt"/>
+                  <!-- Zone Labels -->
+                  <text x="26" y="156" fill="#26a69a" font-size="9" font-weight="600">0 Fear</text>
+                  <text x="135" y="16" fill="#94a3b8" font-size="9" font-weight="600">50</text>
+                  <text x="234" y="156" fill="#ef5350" font-size="9" font-weight="600">Greed 100</text>
+                  <!-- Needle -->
+                  <line x1="150" y1="140" x2="{_nx:.1f}" y2="{_ny:.1f}" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round"/>
+                  <circle cx="150" cy="140" r="8" fill="{mood['color']}" stroke="#ffffff" stroke-width="2.5"/>
+                  <!-- Center Score -->
+                  <text x="150" y="114" text-anchor="middle" fill="{mood['color']}" font-size="30" font-weight="800">{_sc}</text>
+                </svg>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:center;font-size:11px;color:#cbd5e1;margin-top:2px;">
+                <span style="background:#1e222d;padding:3px 8px;border-radius:6px;">Breadth: <b>{br['pct_ema50']}%</b></span>
+                <span style="background:#1e222d;padding:3px 8px;border-radius:6px;">Momentum: <b>{mood.get('mom_score', 50)}</b></span>
+                <span style="background:#1e222d;padding:3px 8px;border-radius:6px;">{_vix_pill}</span>
+                <span style="background:#1e222d;padding:3px 8px;border-radius:6px;">{_gold_pill}</span>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
-        fig_mood.update_layout(
-            height=210,
-            template="plotly_dark",
-            paper_bgcolor="#131722",
-            plot_bgcolor="#131722",
-            margin=dict(l=18, r=18, t=36, b=8),
-        )
-        st.plotly_chart(fig_mood, width="stretch", config={"displaylogo": False})
     with m_col2:
         with st.container(border=True):
-            st.markdown("#### Market Breadth (Asli Tezi Check)")
+            st.markdown("#### Market Breadth (Asli Tezi)")
             st.metric(
                 "Assets Above EMA50",
                 f"{br['above_ema50']} / {br['total']} ({br['pct_ema50']}%)",
                 br["label"],
             )
             st.progress(min(1.0, br["pct_ema50"] / 100.0))
-            vix_txt = f" · India VIX: **{mood['vix']}**" if mood.get("vix") else ""
-            st.caption(f"{mood['tip']}{vix_txt}")
+            st.caption(mood["tip"])
 
-    # Upgrade #2: This Month's Top-5 Momentum Action Card (100% synced with Tab 3)
+        # Upgrade #2: This Month's Top-5 Momentum Action Card (100% synced with Tab 3)
     top5_plan = get_current_top5_allocation(
         stock_data=stock_data,
         nifty_df=nifty_df,
@@ -1149,3 +1166,64 @@ with tab5:
         if st.button("Reset Paper Portfolio"):
             reset_paper_db()
             st.rerun()
+
+
+# ----------------------------------------------------------------------------
+# TAB 6: MARKET PULSE & ALL-IN-ONE LIVE NEWS DESK
+# ----------------------------------------------------------------------------
+with tab6:
+    st.subheader(f"Market Pulse — {market_mode}")
+
+    # 1. Aaj Ka 1-Line Market Verdict (Bina Chart Khole Poora Market Samjho)
+    if regime["is_bullish"] and mood["score"] < 75:
+        verdict_msg = f"**BULLISH & HEALTHY:** {bench_name} uptrend mein hai (`{regime['close']:,.2f}`), Breadth `{br['pct_ema50']}%`, Mood `{mood['score']}/100 ({mood['zone']})`. Top leaders & READY setups par focus karo."
+        st.success(verdict_msg)
+    elif regime["is_bullish"] and mood["score"] >= 75:
+        verdict_msg = f"**OVERHEATED (EXTREME GREED):** {bench_name} strong hai par Mood `{mood['score']}/100` garam hai. Naye breakouts chase mat karo, trailing stop tight rakho."
+        st.warning(verdict_msg)
+    else:
+        verdict_msg = f"**DEFENSIVE / BEAR SHIELD:** {bench_name} weak hai (`{regime['close']:,.2f}`), Breadth `{br['pct_ema50']}%`. Naye aggressive trades avoid karo, Cash / Gold Shield safe rakho."
+        st.error(verdict_msg)
+
+    # 2. Today's Top 3 Gainers & Top 3 Losers
+    movers = []
+    for t_mv, df_mv in stock_data.items():
+        if len(df_mv) >= 2:
+            c_now = safe_float(df_mv["Close"].iloc[-1])
+            c_prev = safe_float(df_mv["Close"].iloc[-2])
+            if c_prev > 0:
+                chg_p = ((c_now - c_prev) / c_prev) * 100.0
+                movers.append({"Ticker": t_mv, "Sector": get_sector(t_mv), "Price": round(c_now, 2), "Day%": round(chg_p, 2)})
+
+    if movers:
+        mv_df = pd.DataFrame(movers).sort_values(by="Day%", ascending=False)
+        gc1, gc2 = st.columns(2)
+        with gc1:
+            st.markdown("#### 🟢 Top 3 Gainers")
+            st.dataframe(mv_df.head(3), width="stretch", hide_index=True)
+        with gc2:
+            st.markdown("#### 🔴 Top 3 Losers")
+            st.dataframe(mv_df.tail(3).sort_values(by="Day%", ascending=True), width="stretch", hide_index=True)
+
+    st.divider()
+
+    # 3. Live Market News Feed (Google News RSS)
+    st.subheader(f"Live {market_mode.split(' (')[0]} News Feed")
+    if use_demo_mode:
+        st.info("Turn off Offline Demo Data Mode in the sidebar to load live market headlines.")
+    else:
+        news_items = fetch_market_news_feed(market_mode)
+        if news_items:
+            caut_n = sum(1 for x in news_items if x["tag"] == "CAUTION")
+            pos_n = sum(1 for x in news_items if x["tag"] == "POSITIVE")
+            st.caption(f"Headline Sentiment Snapshot: 🟢 {pos_n} Positive · 🔴 {caut_n} Caution · ⚪ {len(news_items) - pos_n - caut_n} Neutral")
+            for item in news_items:
+                badge = "🔴" if item["tag"] == "CAUTION" else ("🟢" if item["tag"] == "POSITIVE" else "⚪")
+                with st.container(border=True):
+                    if item["link"]:
+                        st.markdown(f"{badge} **[{item['title']}]({item['link']})**")
+                    else:
+                        st.markdown(f"{badge} **{item['title']}**")
+                    st.caption(f"{item['publisher']} · {item['date']}")
+        else:
+            st.caption("Live headlines abhi fetch nahi ho payin—thodi der baad Refresh dabao.")

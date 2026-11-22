@@ -121,3 +121,57 @@ if _HAS_STREAMLIT:
 else:
     def get_news_shield(ticker: str) -> Dict[str, Any]:
         return _fetch_news_and_earnings_raw(ticker)
+
+
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+
+
+def _fetch_rss_headlines(query: str, max_items: int = 10) -> List[Dict[str, str]]:
+    """Fetch clean market headlines from Google News RSS (zero API key required)."""
+    url = f"https://news.google.com/rss/search?q={urllib.parse.quote(query)}&hl=en-IN&gl=IN&ceid=IN:en"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    items: List[Dict[str, str]] = []
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            xml_data = resp.read()
+        root = ET.fromstring(xml_data)
+        for el in root.findall(".//item")[:max_items]:
+            title = (el.findtext("title") or "").strip()
+            link = (el.findtext("link") or "").strip()
+            pub_date = (el.findtext("pubDate") or "").strip()[:16]
+            source_el = el.find("source")
+            publisher = (source_el.text if source_el is not None and source_el.text else "Market News").strip()
+            if title:
+                items.append(
+                    {
+                        "title": title,
+                        "publisher": publisher,
+                        "date": pub_date,
+                        "link": link,
+                        "tag": _classify_headline(title),
+                    }
+                )
+    except Exception:
+        pass
+    return items
+
+
+def _fetch_market_news_raw(market_mode: str) -> List[Dict[str, str]]:
+    if "Crypto" in market_mode:
+        query = "Bitcoin OR Ethereum OR Crypto market news today"
+    elif "Commodities" in market_mode:
+        query = "Gold price OR Crude Oil OR S&P 500 market news today"
+    else:
+        query = "Nifty 50 OR Sensex OR Indian stock market NSE news today"
+    return _fetch_rss_headlines(query, max_items=12)
+
+
+if _HAS_STREAMLIT:
+    @st.cache_data(ttl=900, show_spinner=False)
+    def fetch_market_news_feed(market_mode: str) -> List[Dict[str, str]]:
+        return _fetch_market_news_raw(market_mode)
+else:
+    def fetch_market_news_feed(market_mode: str) -> List[Dict[str, str]]:
+        return _fetch_market_news_raw(market_mode)
