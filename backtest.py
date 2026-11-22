@@ -155,6 +155,7 @@ def _run_top5_momentum_rotation(
     open_positions: Dict[str, dict] = {}
     pending_target_tickers: List[str] = []
     pending_is_gold_shield = False
+    pending_brake_active = False
     should_rebalance_next_open = False
 
     equity_records: List[Dict[str, Any]] = []
@@ -235,7 +236,8 @@ def _run_top5_momentum_rotation(
                     open_holdings += pos["last_price"] * pos["qty"]
             eq_open = cash + open_holdings
 
-            target_alloc = (eq_open * 0.50) if pending_is_gold_shield else (eq_open * (1.0 / top_n) * 0.98)
+            brake_scale = 0.50 if pending_brake_active else 1.0
+            target_alloc = (eq_open * 0.50) if pending_is_gold_shield else (eq_open * (1.0 / top_n) * 0.98 * brake_scale)
 
             for t in pending_target_tickers:
                 if t in open_positions or dt not in enriched[t].index:
@@ -294,8 +296,14 @@ def _run_top5_momentum_rotation(
             }
         )
 
-        # 4. Every 21 trading days (Monthly): Fast EMA50 Shield + 6M/12M Blended Momentum
+        # 4. Every 21 trading days (Monthly): Fast EMA50 Shield + Equity-Curve Brake + 6M/12M Blended Momentum
         if bar_idx % rebalance_days == 0:
+            # Equity-Curve Profit-Lock Brake: if strategy equity < its 50-day average, cut exposure to 50%
+            if len(equity_records) >= 50:
+                eq_ma50 = sum(r["Equity"] for r in equity_records[-50:]) / 50.0
+                pending_brake_active = (equity_records[-1]["Equity"] < eq_ma50)
+            else:
+                pending_brake_active = False
             if bench_close < bench_ema50:
                 # Fast EMA50 Bear Shield: 50% Gold ETF (if Gold > EMA50) + 50% Cash
                 if gold_ticker and dt in enriched[gold_ticker].index:
@@ -999,3 +1007,111 @@ def run_walk_forward_validation(
         )
 
     return pd.DataFrame(rows)
+
+
+def get_current_top5_allocation(
+    stock_data: Dict[str, pd.DataFrame],
+    nifty_df: pd.DataFrame,
+    capital: float = 100_000.0,
+    allow_fractional: bool = False,
+    top_n: int = 5,
+    emergency_stop_pct: float = 0.10,
+) -> Dict[str, Any]:
+    """Compute exact live 'This Month's Top-5 Portfolio Allocation' matching Tab 3 Momentum Rotation."""
+    if not stock_data or nifty_df is None or nifty_df.empty:
+        return {"mode": "NO DATA", "table": pd.DataFrame(), "shield_active": False}
+
+    nifty = add_indicators(nifty_df)
+    if nifty.empty:
+        return {"mode": "NO DATA", "table": pd.DataFrame(), "shield_active": False}
+
+    n_last = nifty.iloc[-1]
+    bench_close = safe_float(n_last["Close"])
+    bench_ema50 = safe_float(n_last["EMA50"])
+
+    gold_ticker = None
+    for cand in ("GOLDBEES.NS", "GLD", "GC=F"):
+        if cand in stock_data and not stock_data[cand].empty:
+            gold_ticker = cand
+            break
+
+    # Check Fast EMA50 Bear Shield
+    if bench_close < bench_ema50:
+        if gold_ticker:
+            gdf = add_indicators(stock_data[gold_ticker])
+            glast = gdf.iloc[-1]
+            g_close = safe_float(glast["Close"])
+            g_ema50 = safe_float(glast["EMA50"])
+            if g_close > g_ema50 and g_close > 0:
+                alloc = capital * 0.50
+                qty = round(alloc / g_close, 4) if allow_fractional else int(alloc // g_close)
+                tbl = pd.DataFrame(
+                    [
+                        {
+                            "Rank": 1,
+                            "Ticker": gold_ticker,
+                            "Sector": get_sector(gold_ticker),
+                            "Price": round(g_close, 2),
+                            "Weight%": "50%",
+                            "Alloc": round(alloc, 2),
+                            "Qty": qty,
+                            "CrashStop(-10%)": round(g_close * (1.0 - emergency_stop_pct), 2),
+                            "MomScore": "Gold Shield",
+                        }
+                    ]
+                )
+                return {
+                    "mode": f"BEAR SHIELD ACTIVE — 50% {gold_ticker} + 50% Cash",
+                    "table": tbl,
+                    "shield_active": True,
+                }
+        return {
+            "mode": "BEAR SHIELD ACTIVE — 100% Cash Safe (Benchmark < EMA50)",
+            "table": pd.DataFrame(),
+            "shield_active": True,
+        }
+
+    # Bullish Regime: Rank by 6M + 12M Risk-Adjusted Momentum above EMA50
+    ranked = []
+    for t, df in stock_data.items():
+        ind = add_indicators(df)
+        if ind.empty or len(ind) < 70:
+            continue
+        ind["ROC126"] = ind["Close"].pct_change(126) * 100.0
+        ind["ROC252"] = ind["Close"].pct_change(252) * 100.0
+        ind["Vol60_Std"] = ind["Close"].pct_change().rolling(60, min_periods=20).std().replace(0, np.nan)
+        r = ind.iloc[-1]
+        c = safe_float(r["Close"])
+        e50 = safe_float(r["EMA50"])
+        roc6m = safe_float(r["ROC126"])
+        roc12m = safe_float(r["ROC252"], default=roc6m)
+        blended = 0.5 * roc6m + 0.5 * roc12m
+        vol_s = safe_float(r["Vol60_Std"], default=0.02)
+        if c > e50 and blended > 0 and vol_s > 0:
+            ranked.append((blended / (vol_s * 100.0), t, c, blended))
+
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    top_picks = ranked[:top_n]
+    alloc_each = capital * (1.0 / top_n) * 0.98
+
+    rows = []
+    for idx, (m_score, t, c, blended) in enumerate(top_picks, start=1):
+        qty = round(alloc_each / c, 4) if allow_fractional else int(alloc_each // c)
+        rows.append(
+            {
+                "Rank": idx,
+                "Ticker": t,
+                "Sector": get_sector(t),
+                "Price": round(c, 2),
+                "Weight%": f"{int(100/top_n)}%",
+                "Alloc": round(alloc_each, 2),
+                "Qty": qty,
+                "CrashStop(-10%)": round(c * (1.0 - emergency_stop_pct), 2),
+                "MomScore": f"{m_score:.1f} ({blended:+.1f}%)",
+            }
+        )
+    return {
+        "mode": f"BULLISH — Hold Top {len(rows)} Leaders (20% Equal Weight)",
+        "table": pd.DataFrame(rows),
+        "shield_active": False,
+    }

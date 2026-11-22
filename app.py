@@ -19,6 +19,7 @@ from alerts import format_signal_message, send_telegram_alert
 from journal_sync import is_cloud_sync_configured, pull_journal_from_github, push_journal_to_github
 from news_shield import get_news_shield
 from backtest import (
+    get_current_top5_allocation,
     run_parameter_heatmap,
     run_portfolio_backtest,
     run_walk_forward_validation,
@@ -354,6 +355,25 @@ with tab1:
         st.error(
             f"**{bench_name} Regime: {regime['label']}** | Close: {regime['close']:,.2f} | EMA20: {regime['ema20']:,.2f} | EMA50: {regime['ema50']:,.2f}"
         )
+
+    # Upgrade #2: This Month's Top-5 Momentum Action Card (100% synced with Tab 3)
+    top5_plan = get_current_top5_allocation(
+        stock_data=stock_data,
+        nifty_df=nifty_df,
+        capital=float(capital),
+        allow_fractional=allow_frac,
+    )
+    with st.container(border=True):
+        st.subheader("This Month's Top-5 Portfolio Action Plan")
+        if top5_plan["shield_active"]:
+            st.warning(f"**Status:** {top5_plan['mode']}")
+        else:
+            st.success(f"**Status:** {top5_plan['mode']}")
+        if not top5_plan["table"].empty:
+            st.dataframe(top5_plan["table"], width="stretch", hide_index=True)
+            st.caption(f"Monthly Rebalance Guide: Allocate {curr}{float(capital)*0.20:,.0f} (20%) per leader · Daily Emergency Stop at -10%.")
+        else:
+            st.info("No active Top-5 allocations right now — keep capital protected in Cash.")
 
     scan_df = scan_watchlist(
         stock_data=stock_data,
