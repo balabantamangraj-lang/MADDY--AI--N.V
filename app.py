@@ -162,6 +162,11 @@ def add_paper_trade(
             ),
         )
         conn.commit()
+    if is_cloud_sync_configured():
+        try:
+            push_journal_to_github(load_paper_trades())
+        except Exception:
+            pass
 
 
 def close_paper_trade(trade_id: int, exit_price: float) -> None:
@@ -182,6 +187,11 @@ def close_paper_trade(trade_id: int, exit_price: float) -> None:
             (datetime.now().strftime("%Y-%m-%d %H:%M"), round(float(exit_price), 2), round(pnl, 2), trade_id),
         )
         conn.commit()
+    if is_cloud_sync_configured():
+        try:
+            push_journal_to_github(load_paper_trades())
+        except Exception:
+            pass
 
 
 def reset_paper_db() -> None:
@@ -240,6 +250,15 @@ st.markdown(
 )
 
 init_paper_db()
+if "cloud_journal_checked" not in st.session_state:
+    st.session_state["cloud_journal_checked"] = True
+    try:
+        if is_cloud_sync_configured() and load_paper_trades().empty:
+            _cdf, _ = pull_journal_from_github()
+            if _cdf is not None and not _cdf.empty:
+                restore_paper_trades_from_df(_cdf)
+    except Exception:
+        pass
 
 # ============================================================================
 # Collapsible Sidebar Controls
@@ -1143,7 +1162,10 @@ with tab5:
         c_sync1, c_sync2 = st.columns(2)
         if c_sync1.button("Save Journal to GitHub Cloud", width="stretch"):
             ok_s, msg_s = push_journal_to_github(paper_df)
-            st.success(msg_s) if ok_s else st.info(msg_s)
+            if ok_s:
+                st.success(msg_s)
+            else:
+                st.info(msg_s)
         if c_sync2.button("Restore from GitHub Cloud", width="stretch"):
             cloud_df, msg_c = pull_journal_from_github()
             if cloud_df is not None:
