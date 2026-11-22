@@ -1,0 +1,31 @@
+name: Maddy AI Daily Telegram Scan
+
+on:
+  schedule:
+    - cron: "40 9 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  scan-and-alert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Maddy AI Scanner & Send Telegram Alerts
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MADDY_CAPITAL: "100000"
+          MADDY_SL_MULT: "2.0"
+          MADDY_TP_MULT: "3.5"
+        run: python run_daily_alerts.py
+        
