@@ -439,18 +439,65 @@ with tab1:
                                 st.code(msg, language="text")
 
 # ----------------------------------------------------------------------------
-# TAB 2: INTERACTIVE SMART CHARTS (PLOTLY VISUALS)
+# TAB 2: INTERACTIVE SMART CHARTS (TRADINGVIEW PRO STYLE)
 # ----------------------------------------------------------------------------
 with tab2:
-    c_sel, c_bars = st.columns([2, 1])
-    selected_ticker = c_sel.selectbox("Select Stock for Smart Chart", options=list(stock_data.keys()))
-    bars_to_show = c_bars.slider("Candles to Display", 40, 180, 90, 10)
+    c_sel, c_rng = st.columns([2, 1])
+    selected_ticker = c_sel.selectbox("Select Symbol", options=list(stock_data.keys()))
+    range_choice = c_rng.selectbox("Range", options=["1M (22D)", "3M (65D)", "6M (130D)", "1Y (252D)"], index=1)
+    bars_map = {"1M (22D)": 22, "3M (65D)": 65, "6M (130D)": 130, "1Y (252D)": 252}
+    bars_to_show = bars_map[range_choice]
 
-    df_chart = add_indicators(stock_data[selected_ticker]).tail(bars_to_show)
+    # TradingView-style compact layer toggles
+    tg1, tg2, tg3, tg4 = st.columns(4)
+    show_ema = tg1.checkbox("EMA 20/50", value=True, key="tv_ema")
+    show_fvg = tg2.checkbox("FVG Zones", value=True, key="tv_fvg")
+    show_gaps = tg3.checkbox("Market Gaps", value=True, key="tv_gaps")
+    show_vol = tg4.checkbox("Volume", value=True, key="tv_vol")
+
+    df_full = add_indicators(stock_data[selected_ticker])
+    df_chart = df_full.tail(bars_to_show)
     fvg_zones = detect_fvg_zones(df_chart, lookback=bars_to_show)
     gap_zones = detect_market_gaps(df_chart, lookback=bars_to_show)
 
-    fig = go.Figure()
+    # TradingView-style OHLC Live Header Strip
+    last_bar = df_chart.iloc[-1]
+    prev_bar = df_chart.iloc[-2] if len(df_chart) >= 2 else last_bar
+    ltp = safe_float(last_bar["Close"])
+    prev_c = safe_float(prev_bar["Close"], default=ltp)
+    chg = ltp - prev_c
+    chg_pct = (chg / prev_c * 100.0) if prev_c > 0 else 0.0
+    chg_color = "#26a69a" if chg >= 0 else "#ef5350"
+    st.markdown(
+        f"""
+        <div style="background:#131722;border:1px solid #2a2e39;border-radius:10px;padding:10px 14px;margin-bottom:8px;color:#d1d4dc;font-family:Inter,sans-serif;">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px;">
+            <div>
+              <span style="font-size:17px;font-weight:700;color:#ffffff;">{selected_ticker}</span>
+              <span style="font-size:12px;color:#787b86;margin-left:6px;">1D · {get_sector(selected_ticker)}</span>
+            </div>
+            <div>
+              <span style="font-size:18px;font-weight:700;color:#ffffff;">{curr}{ltp:,.2f}</span>
+              <span style="font-size:13px;font-weight:600;color:{chg_color};margin-left:6px;">{chg:+.2f} ({chg_pct:+.2f}%)</span>
+            </div>
+          </div>
+          <div style="font-size:11px;color:#9598a1;margin-top:4px;">
+            O: <b style="color:#d1d4dc;">{curr}{safe_float(last_bar['Open']):,.2f}</b> &nbsp;
+            H: <b style="color:#26a69a;">{curr}{safe_float(last_bar['High']):,.2f}</b> &nbsp;
+            L: <b style="color:#ef5350;">{curr}{safe_float(last_bar['Low']):,.2f}</b> &nbsp;
+            C: <b style="color:#d1d4dc;">{curr}{ltp:,.2f}</b> &nbsp;
+            RSI14: <b style="color:#f59e0b;">{safe_float(last_bar.get('RSI14', 50)):.1f}</b>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if show_vol:
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.78, 0.22])
+    else:
+        fig = make_subplots(rows=1, cols=1)
+
     fig.add_trace(
         go.Candlestick(
             x=df_chart.index,
@@ -459,68 +506,116 @@ with tab2:
             low=df_chart["Low"],
             close=df_chart["Close"],
             name=selected_ticker,
-        )
+            increasing=dict(line=dict(color="#26a69a", width=1), fillcolor="#26a69a"),
+            decreasing=dict(line=dict(color="#ef5350", width=1), fillcolor="#ef5350"),
+        ),
+        row=1,
+        col=1,
     )
-    fig.add_trace(
-        go.Scatter(
-            x=df_chart.index,
-            y=df_chart["EMA20"],
-            mode="lines",
-            name="EMA20",
-            line=dict(color="#2563eb", width=2),
+
+    if show_ema:
+        fig.add_trace(
+            go.Scatter(
+                x=df_chart.index,
+                y=df_chart["EMA20"],
+                mode="lines",
+                name="EMA20",
+                line=dict(color="#2962ff", width=1.8),
+            ),
+            row=1,
+            col=1,
         )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=df_chart.index,
-            y=df_chart["EMA50"],
-            mode="lines",
-            name="EMA50",
-            line=dict(color="#f59e0b", width=1.4, dash="dot"),
+        fig.add_trace(
+            go.Scatter(
+                x=df_chart.index,
+                y=df_chart["EMA50"],
+                mode="lines",
+                name="EMA50",
+                line=dict(color="#ff9800", width=1.4, dash="dot"),
+            ),
+            row=1,
+            col=1,
         )
-    )
+
+    if show_vol:
+        vol_colors = [
+            "rgba(38,166,154,0.55)" if c >= o else "rgba(239,83,80,0.55)"
+            for o, c in zip(df_chart["Open"], df_chart["Close"])
+        ]
+        fig.add_trace(
+            go.Bar(
+                x=df_chart.index,
+                y=df_chart["Volume"],
+                name="Volume",
+                marker_color=vol_colors,
+                showlegend=False,
+            ),
+            row=2,
+            col=1,
+        )
 
     last_dt = df_chart.index[-1]
 
     # Plot Bullish/Bearish FVG Boxes + 50% Midpoint Line
-    for z in fvg_zones[-10:]:
-        is_bull = z["type"] == "Bullish FVG"
-        fill_col = "rgba(16, 185, 129, 0.16)" if is_bull else "rgba(239, 68, 68, 0.16)"
-        line_col = "rgba(16, 185, 129, 0.65)" if is_bull else "rgba(239, 68, 68, 0.65)"
-
-        fig.add_shape(
-            type="rect",
-            x0=z["start_date"],
-            x1=last_dt,
-            y0=z["bottom"],
-            y1=z["top"],
-            fillcolor=fill_col,
-            line=dict(color=line_col, width=1),
-        )
-        # 50% Midpoint dashed line
-        fig.add_shape(
-            type="line",
-            x0=z["start_date"],
-            x1=last_dt,
-            y0=z["midpoint"],
-            y1=z["midpoint"],
-            line=dict(color=line_col, width=1, dash="dash"),
-        )
+    if show_fvg:
+        for z in fvg_zones[-8:]:
+            is_bull = z["type"] == "Bullish FVG"
+            fill_col = "rgba(38, 166, 154, 0.16)" if is_bull else "rgba(239, 83, 80, 0.16)"
+            line_col = "rgba(38, 166, 154, 0.65)" if is_bull else "rgba(239, 83, 80, 0.65)"
+            fig.add_shape(
+                type="rect",
+                x0=z["start_date"],
+                x1=last_dt,
+                y0=z["bottom"],
+                y1=z["top"],
+                fillcolor=fill_col,
+                line=dict(color=line_col, width=1),
+                row=1,
+                col=1,
+            )
+            fig.add_shape(
+                type="line",
+                x0=z["start_date"],
+                x1=last_dt,
+                y0=z["midpoint"],
+                y1=z["midpoint"],
+                line=dict(color=line_col, width=1, dash="dash"),
+                row=1,
+                col=1,
+            )
 
     # Plot Market Gap Zones
-    for g in gap_zones[-6:]:
-        g_col = "rgba(99, 102, 241, 0.18)" if g["direction"] == "Gap Up" else "rgba(249, 115, 22, 0.18)"
-        fig.add_shape(
-            type="rect",
-            x0=g["prev_date"],
-            x1=g["date"],
-            y0=g["bottom"],
-            y1=g["top"],
-            fillcolor=g_col,
-            line=dict(color="rgba(99, 102, 241, 0.7)", width=1),
-        )
+    if show_gaps:
+        for g in gap_zones[-6:]:
+            g_col = "rgba(41, 98, 255, 0.20)" if g["direction"] == "Gap Up" else "rgba(255, 152, 0, 0.20)"
+            fig.add_shape(
+                type="rect",
+                x0=g["prev_date"],
+                x1=g["date"],
+                y0=g["bottom"],
+                y1=g["top"],
+                fillcolor=g_col,
+                line=dict(color="rgba(41, 98, 255, 0.75)", width=1),
+                row=1,
+                col=1,
+            )
 
-    # Overlay Backtest Buy / Sell Markers for this stock
+    # TradingView Horizontal Last-Price Dotted Line + Right-Axis Badge
+    fig.add_hline(
+        y=ltp,
+        line_dash="dot",
+        line_color=chg_color,
+        line_width=1.2,
+        annotation_text=f" {curr}{ltp:,.2f} ",
+        annotation_position="right",
+        annotation_bgcolor=chg_color,
+        annotation_font_color="#ffffff",
+        annotation_font_size=11,
+        row=1,
+        col=1,
+    )
+
+    # Overlay Backtest Buy / Sell Markers
     if "trade_log" in bt_results and not bt_results["trade_log"].empty:
         tlog = bt_results["trade_log"]
         sub_t = tlog[tlog["Ticker"] == selected_ticker]
@@ -542,9 +637,11 @@ with tab2:
                         x=buy_x,
                         y=buy_y,
                         mode="markers",
-                        name="Buy Entry",
-                        marker=dict(symbol="triangle-up", size=12, color="#10b981"),
-                    )
+                        name="Buy",
+                        marker=dict(symbol="triangle-up", size=12, color="#26a69a", line=dict(color="#ffffff", width=1)),
+                    ),
+                    row=1,
+                    col=1,
                 )
             if sell_x:
                 fig.add_trace(
@@ -552,18 +649,52 @@ with tab2:
                         x=sell_x,
                         y=sell_y,
                         mode="markers",
-                        name="Sell Exit",
-                        marker=dict(symbol="triangle-down", size=12, color="#ef4444"),
-                    )
+                        name="Sell",
+                        marker=dict(symbol="triangle-down", size=12, color="#ef5350", line=dict(color="#ffffff", width=1)),
+                    ),
+                    row=1,
+                    col=1,
                 )
 
     fig.update_layout(
-        height=520,
+        height=560,
+        template="plotly_dark",
+        paper_bgcolor="#131722",
+        plot_bgcolor="#131722",
+        font=dict(color="#d1d4dc", family="Inter, sans-serif", size=11),
+        hovermode="x unified",
         xaxis_rangeslider_visible=False,
-        margin=dict(l=10, r=10, t=30, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        margin=dict(l=8, r=58, t=16, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0, bgcolor="rgba(0,0,0,0)"),
+        dragmode="pan",
     )
-    st.plotly_chart(fig, width="stretch")
+    fig.update_xaxes(
+        gridcolor="#1e222d",
+        showline=True,
+        linecolor="#2a2e39",
+        showspikes=True,
+        spikemode="across",
+        spikecolor="#787b86",
+        spikethickness=1,
+        spikedash="dash",
+    )
+    fig.update_yaxes(
+        side="right",
+        gridcolor="#1e222d",
+        showline=True,
+        linecolor="#2a2e39",
+        showspikes=True,
+        spikemode="across",
+        spikecolor="#787b86",
+        spikethickness=1,
+        spikedash="dash",
+        row=1,
+        col=1,
+    )
+    if show_vol:
+        fig.update_yaxes(side="right", gridcolor="#1e222d", showticklabels=False, row=2, col=1)
+
+    st.plotly_chart(fig, width="stretch", config={"scrollZoom": True, "displaylogo": False})
 
     c_fvg, c_gap = st.columns(2)
     with c_fvg:
