@@ -17,6 +17,7 @@ import streamlit.components.v1 as components
 
 from alerts import format_signal_message, send_telegram_alert
 from journal_sync import is_cloud_sync_configured, pull_journal_from_github, push_journal_to_github
+from market_intel import compute_market_mood, get_company_health
 from news_shield import get_news_shield
 from backtest import (
     get_current_top5_allocation,
@@ -88,6 +89,46 @@ def init_paper_db() -> None:
 
 def load_paper_trades() -> pd.DataFrame:
     init_paper_db()
+
+
+def style_tradingview(fig: go.Figure, height: int = 440, right_axis: bool = True, show_crosshair: bool = True) -> go.Figure:
+    """Apply consistent TradingView Pro Dark styling (#131722 canvas, crisp grids, right price axis)."""
+    fig.update_layout(
+        height=height,
+        template="plotly_dark",
+        paper_bgcolor="#131722",
+        plot_bgcolor="#131722",
+        font=dict(color="#d1d4dc", family="Inter, sans-serif", size=11),
+        hovermode="x unified" if show_crosshair else "closest",
+        margin=dict(l=10, r=52 if right_axis else 14, t=30, b=14),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, bgcolor="rgba(0,0,0,0)"),
+    )
+    if show_crosshair:
+        fig.update_xaxes(
+            gridcolor="#1e222d",
+            showline=True,
+            linecolor="#2a2e39",
+            showspikes=True,
+            spikemode="across",
+            spikecolor="#787b86",
+            spikethickness=1,
+            spikedash="dash",
+        )
+        fig.update_yaxes(
+            side="right" if right_axis else "left",
+            gridcolor="#1e222d",
+            showline=True,
+            linecolor="#2a2e39",
+            showspikes=True,
+            spikemode="across",
+            spikecolor="#787b86",
+            spikethickness=1,
+            spikedash="dash",
+        )
+    else:
+        fig.update_xaxes(gridcolor="#1e222d", linecolor="#2a2e39")
+        fig.update_yaxes(gridcolor="#1e222d", linecolor="#2a2e39")
+    return fig
     with sqlite3.connect(DB_PATH) as conn:
         return pd.read_sql_query("SELECT * FROM paper_trades ORDER BY id DESC", conn)
 
@@ -363,6 +404,56 @@ with tab1:
             f"**{bench_name} Regime: {regime['label']}** | Close: {regime['close']:,.2f} | EMA20: {regime['ema20']:,.2f} | EMA50: {regime['ema50']:,.2f}"
         )
 
+    # Market Mood Meter (0-100) + Market Breadth Card (TradingView Dark Style)
+    mood = compute_market_mood(
+        stock_data=stock_data,
+        bench_df=nifty_df,
+        is_nse=(not is_crypto and not is_global),
+        use_demo_mode=use_demo_mode,
+    )
+    br = mood["breadth"]
+    m_col1, m_col2 = st.columns([1.2, 1])
+    with m_col1:
+        fig_mood = go.Figure(
+            go.Indicator(
+                mode="gauge+number",
+                value=mood["score"],
+                title={"text": f"Market Mood: {mood['zone']}", "font": {"size": 14, "color": "#e2e8f0"}},
+                number={"font": {"size": 28, "color": mood["color"]}},
+                gauge={
+                    "axis": {"range": [0, 100], "tickcolor": "#787b86"},
+                    "bar": {"color": mood["color"]},
+                    "bgcolor": "#1e222d",
+                    "steps": [
+                        {"range": [0, 25], "color": "rgba(239,83,80,0.22)"},
+                        {"range": [25, 45], "color": "rgba(255,152,0,0.18)"},
+                        {"range": [45, 55], "color": "rgba(148,163,184,0.14)"},
+                        {"range": [55, 75], "color": "rgba(38,166,154,0.20)"},
+                        {"range": [75, 100], "color": "rgba(0,230,118,0.24)"},
+                    ],
+                },
+            )
+        )
+        fig_mood.update_layout(
+            height=210,
+            template="plotly_dark",
+            paper_bgcolor="#131722",
+            plot_bgcolor="#131722",
+            margin=dict(l=18, r=18, t=36, b=8),
+        )
+        st.plotly_chart(fig_mood, width="stretch", config={"displaylogo": False})
+    with m_col2:
+        with st.container(border=True):
+            st.markdown("#### Market Breadth (Asli Tezi Check)")
+            st.metric(
+                "Assets Above EMA50",
+                f"{br['above_ema50']} / {br['total']} ({br['pct_ema50']}%)",
+                br["label"],
+            )
+            st.progress(min(1.0, br["pct_ema50"] / 100.0))
+            vix_txt = f" · India VIX: **{mood['vix']}**" if mood.get("vix") else ""
+            st.caption(f"{mood['tip']}{vix_txt}")
+
     # Upgrade #2: This Month's Top-5 Momentum Action Card (100% synced with Tab 3)
     top5_plan = get_current_top5_allocation(
         stock_data=stock_data,
@@ -406,7 +497,7 @@ with tab1:
         sec_df = compute_sector_strength(scan_df)
         if not sec_df.empty:
             with st.expander("Sector Strength Radar (Top-Down Market Leaders)", expanded=True):
-                bar_colors = ["#10b981" if v >= 0 else "#ef4444" for v in sec_df["Avg_RS%"]]
+                bar_colors = ["#26a69a" if v >= 0 else "#ef5350" for v in sec_df["Avg_RS%"]]
                 fig_sec = go.Figure(
                     go.Bar(
                         x=sec_df["Avg_RS%"],
@@ -415,15 +506,16 @@ with tab1:
                         marker_color=bar_colors,
                         text=[f"{v:+.2f}% ({ldr})" for v, ldr in zip(sec_df["Avg_RS%"], sec_df["Top_Leader"])],
                         textposition="auto",
+                        textfont=dict(color="#ffffff"),
                     )
                 )
+                style_tradingview(fig_sec, height=max(260, 36 * len(sec_df)), right_axis=False, show_crosshair=False)
                 fig_sec.update_layout(
-                    height=max(240, 34 * len(sec_df)),
-                    margin=dict(l=10, r=10, t=10, b=10),
                     xaxis_title=f"Avg 20D Relative Strength vs {bench_name} (%)",
                     yaxis=dict(autorange="reversed"),
+                    margin=dict(l=10, r=14, t=14, b=14),
                 )
-                st.plotly_chart(fig_sec, width="stretch")
+                st.plotly_chart(fig_sec, width="stretch", config={"displaylogo": False})
 
         ready_df = scan_df[scan_df["Status"] == "READY"]
         st.subheader(f"Exact Trade Cards ({len(ready_df)} READY)")
@@ -744,6 +836,25 @@ with tab2:
                 hide_index=True,
             )
 
+    # Company Health Badge (Fundamental Check)
+    with st.expander(f"Company Health Badge — {selected_ticker}", expanded=True):
+        if use_demo_mode:
+            st.caption("Turn off Offline Demo Data Mode to view live company financial ratios.")
+        else:
+            ch = get_company_health(selected_ticker)
+            if ch.get("applicable"):
+                hc1, hc2, hc3, hc4 = st.columns(4)
+                hc1.metric("Health Verdict", ch["badge"], f"Score {ch['score']}/100")
+                hc2.metric("P/E Ratio", f"{ch['pe']}" if ch.get("pe") else "N/A")
+                hc3.metric("ROE %", f"{ch['roe']}%" if ch.get("roe") is not None else "N/A")
+                hc4.metric("Debt / Equity", f"{ch['dte']}%" if ch.get("dte") is not None else "N/A")
+                if ch.get("strengths"):
+                    st.caption("Strengths: " + " · ".join(ch["strengths"]))
+                if ch.get("flags"):
+                    st.warning("Watchouts: " + " · ".join(ch["flags"]))
+            else:
+                st.caption(f"**{ch['badge']}** — {ch.get('note', '')}")
+
     # Upgrade #4: News & Earnings Risk Shield
     with st.expander(f"News & Earnings Risk Shield — {selected_ticker}", expanded=False):
         if use_demo_mode:
@@ -785,14 +896,26 @@ with tab3:
         k6.metric("Beta", f"{m['Beta']}")
 
         eq_df = bt_results["equity_curve"]
-        fig_eq = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.68, 0.32])
+        fig_eq = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.70, 0.30])
         fig_eq.add_trace(
-            go.Scatter(x=eq_df.index, y=eq_df["Equity"], name=f"Maddy AI ({curr})", line=dict(color="#4f46e5", width=2.4)),
+            go.Scatter(
+                x=eq_df.index,
+                y=eq_df["Equity"],
+                name=f"Maddy AI ({curr})",
+                line=dict(color="#26a69a", width=2.4),
+                fill="tozeroy",
+                fillcolor="rgba(38, 166, 154, 0.08)",
+            ),
             row=1,
             col=1,
         )
         fig_eq.add_trace(
-            go.Scatter(x=eq_df.index, y=eq_df["NiftyNorm"], name=f"{bench_name} Benchmark ({curr})", line=dict(color="#94a3b8", width=1.8, dash="dot")),
+            go.Scatter(
+                x=eq_df.index,
+                y=eq_df["NiftyNorm"],
+                name=f"{bench_name} ({curr})",
+                line=dict(color="#787b86", width=1.6, dash="dot"),
+            ),
             row=1,
             col=1,
         )
@@ -800,15 +923,17 @@ with tab3:
             go.Scatter(
                 x=eq_df.index,
                 y=eq_df["Drawdown%"],
-                name="Drawdown (%)",
+                name="Drawdown %",
                 fill="tozeroy",
-                line=dict(color="#ef4444", width=1.5),
+                fillcolor="rgba(239, 83, 80, 0.22)",
+                line=dict(color="#ef5350", width=1.5),
             ),
             row=2,
             col=1,
         )
-        fig_eq.update_layout(height=500, margin=dict(l=10, r=10, t=25, b=10), legend=dict(orientation="h", y=1.06))
-        st.plotly_chart(fig_eq, width="stretch")
+        style_tradingview(fig_eq, height=520, right_axis=True, show_crosshair=True)
+        fig_eq.update_layout(dragmode="pan")
+        st.plotly_chart(fig_eq, width="stretch", config={"scrollZoom": True, "displaylogo": False})
 
         if "yearly_breakdown" in bt_results and not bt_results["yearly_breakdown"].empty:
             st.subheader("Yearly Performance Breakdown (Maddy AI vs Benchmark)")
@@ -856,11 +981,12 @@ with tab4:
                 fig_mc.add_trace(
                     go.Scatter(x=x_days, y=path, mode="lines", line=dict(color="rgba(148,163,184,0.22)", width=1), showlegend=False)
                 )
-            fig_mc.add_trace(go.Scatter(x=x_days, y=mc["p95_path"], name="95th %ile", line=dict(color="#10b981", width=2)))
-            fig_mc.add_trace(go.Scatter(x=x_days, y=mc["p50_path"], name="Median (50th)", line=dict(color="#4f46e5", width=2.5)))
-            fig_mc.add_trace(go.Scatter(x=x_days, y=mc["p5_path"], name="5th %ile Worst-Case", line=dict(color="#ef4444", width=2)))
-            fig_mc.update_layout(height=380, margin=dict(l=10, r=10, t=20, b=10), xaxis_title="Trading Days", yaxis_title=f"Equity ({curr})")
-            st.plotly_chart(fig_mc, width="stretch")
+            fig_mc.add_trace(go.Scatter(x=x_days, y=mc["p95_path"], name="95th %ile", line=dict(color="#26a69a", width=2)))
+            fig_mc.add_trace(go.Scatter(x=x_days, y=mc["p50_path"], name="Median (50th)", line=dict(color="#2962ff", width=2.5)))
+            fig_mc.add_trace(go.Scatter(x=x_days, y=mc["p5_path"], name="5th %ile Worst-Case", line=dict(color="#ef5350", width=2)))
+            style_tradingview(fig_mc, height=400, right_axis=True, show_crosshair=True)
+            fig_mc.update_layout(xaxis_title="Trading Days", yaxis_title=f"Equity ({curr})")
+            st.plotly_chart(fig_mc, width="stretch", config={"displaylogo": False})
 
     st.divider()
     st.subheader("2. Parameter Stability Heatmap & Walk-Forward Optimization (WFO)")
@@ -879,8 +1005,9 @@ with tab4:
                 texttemplate="%{text}%",
             )
         )
-        fig_hm.update_layout(height=340, margin=dict(l=10, r=10, t=25, b=10), title="Net Return % (SL vs TP ATR Multipliers)")
-        st.plotly_chart(fig_hm, width="stretch")
+        style_tradingview(fig_hm, height=360, right_axis=False, show_crosshair=False)
+        fig_hm.update_layout(title="Net Return % (SL vs TP ATR Multipliers)")
+        st.plotly_chart(fig_hm, width="stretch", config={"displaylogo": False})
 
         st.markdown("**Walk-Forward Optimization (In-Sample → Unseen Out-of-Sample)**")
         if not wfo_df.empty:
@@ -947,8 +1074,15 @@ with tab5:
                 },
             )
         )
-        fig_heat.update_layout(height=250, margin=dict(l=20, r=20, t=40, b=10))
-        st.plotly_chart(fig_heat, width="stretch")
+        fig_heat.update_layout(
+            height=260,
+            template="plotly_dark",
+            paper_bgcolor="#131722",
+            plot_bgcolor="#131722",
+            font=dict(color="#d1d4dc", family="Inter, sans-serif"),
+            margin=dict(l=20, r=20, t=44, b=10),
+        )
+        st.plotly_chart(fig_heat, width="stretch", config={"displaylogo": False})
 
     with g2:
         st.markdown("**Sector Exposure (Max 30% per Sector)**")
