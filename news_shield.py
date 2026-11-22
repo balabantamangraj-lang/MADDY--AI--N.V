@@ -123,13 +123,22 @@ else:
         return _fetch_news_and_earnings_raw(ticker)
 
 
+import html as _html
+import re as _re
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
 
-def _fetch_rss_headlines(query: str, max_items: int = 10) -> List[Dict[str, str]]:
-    """Fetch clean market headlines from Google News RSS (zero API key required)."""
+def _strip_html(raw_text: str) -> str:
+    txt = _html.unescape(raw_text or "")
+    txt = _re.sub(r"<[^>]+>", " ", txt)
+    txt = _re.sub(r"\s+", " ", txt).strip()
+    return txt
+
+
+def _fetch_rss_headlines(query: str, max_items: int = 8) -> List[Dict[str, str]]:
+    """Fetch clean, link-free readable market headlines + short summaries from Google News RSS."""
     url = f"https://news.google.com/rss/search?q={urllib.parse.quote(query)}&hl=en-IN&gl=IN&ceid=IN:en"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     items: List[Dict[str, str]] = []
@@ -138,19 +147,28 @@ def _fetch_rss_headlines(query: str, max_items: int = 10) -> List[Dict[str, str]
             xml_data = resp.read()
         root = ET.fromstring(xml_data)
         for el in root.findall(".//item")[:max_items]:
-            title = (el.findtext("title") or "").strip()
-            link = (el.findtext("link") or "").strip()
-            pub_date = (el.findtext("pubDate") or "").strip()[:16]
+            raw_title = (el.findtext("title") or "").strip()
             source_el = el.find("source")
-            publisher = (source_el.text if source_el is not None and source_el.text else "Market News").strip()
-            if title:
+            publisher = (source_el.text if source_el is not None and source_el.text else "Market Desk").strip()
+            # Remove trailing " - Publisher" from Google News title for cleaner reading
+            clean_title = raw_title
+            if publisher and clean_title.endswith(f" - {publisher}"):
+                clean_title = clean_title[: -len(f" - {publisher}")].strip()
+            desc = _strip_html(el.findtext("description") or "")
+            # Avoid repeating identical title as summary
+            if desc.lower().startswith(clean_title.lower()[:35]):
+                summary = ""
+            else:
+                summary = desc[:180] + ("..." if len(desc) > 180 else "")
+            pub_date = (el.findtext("pubDate") or "").strip()[:16]
+            if clean_title:
                 items.append(
                     {
-                        "title": title,
+                        "title": clean_title,
+                        "summary": summary,
                         "publisher": publisher,
                         "date": pub_date,
-                        "link": link,
-                        "tag": _classify_headline(title),
+                        "tag": _classify_headline(clean_title + " " + summary),
                     }
                 )
     except Exception:
@@ -165,7 +183,7 @@ def _fetch_market_news_raw(market_mode: str) -> List[Dict[str, str]]:
         query = "Gold price OR Crude Oil OR S&P 500 market news today"
     else:
         query = "Nifty 50 OR Sensex OR Indian stock market NSE news today"
-    return _fetch_rss_headlines(query, max_items=12)
+    return _fetch_rss_headlines(query, max_items=8)
 
 
 if _HAS_STREAMLIT:

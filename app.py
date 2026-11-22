@@ -1169,23 +1169,12 @@ with tab5:
 
 
 # ----------------------------------------------------------------------------
-# TAB 6: MARKET PULSE & ALL-IN-ONE LIVE NEWS DESK
+# TAB 6: 1-MINUTE DAILY MARKET BRIEFING (LINK-FREE, IN-APP READING)
 # ----------------------------------------------------------------------------
 with tab6:
-    st.subheader(f"Market Pulse — {market_mode}")
+    st.subheader(f"1-Minute Daily Briefing — {market_mode}")
 
-    # 1. Aaj Ka 1-Line Market Verdict (Bina Chart Khole Poora Market Samjho)
-    if regime["is_bullish"] and mood["score"] < 75:
-        verdict_msg = f"**BULLISH & HEALTHY:** {bench_name} uptrend mein hai (`{regime['close']:,.2f}`), Breadth `{br['pct_ema50']}%`, Mood `{mood['score']}/100 ({mood['zone']})`. Top leaders & READY setups par focus karo."
-        st.success(verdict_msg)
-    elif regime["is_bullish"] and mood["score"] >= 75:
-        verdict_msg = f"**OVERHEATED (EXTREME GREED):** {bench_name} strong hai par Mood `{mood['score']}/100` garam hai. Naye breakouts chase mat karo, trailing stop tight rakho."
-        st.warning(verdict_msg)
-    else:
-        verdict_msg = f"**DEFENSIVE / BEAR SHIELD:** {bench_name} weak hai (`{regime['close']:,.2f}`), Breadth `{br['pct_ema50']}%`. Naye aggressive trades avoid karo, Cash / Gold Shield safe rakho."
-        st.error(verdict_msg)
-
-    # 2. Today's Top 3 Gainers & Top 3 Losers
+    # Compute live movers & sector leaders for the plain-English briefing
     movers = []
     for t_mv, df_mv in stock_data.items():
         if len(df_mv) >= 2:
@@ -1194,36 +1183,85 @@ with tab6:
             if c_prev > 0:
                 chg_p = ((c_now - c_prev) / c_prev) * 100.0
                 movers.append({"Ticker": t_mv, "Sector": get_sector(t_mv), "Price": round(c_now, 2), "Day%": round(chg_p, 2)})
+    mv_df = pd.DataFrame(movers).sort_values(by="Day%", ascending=False) if movers else pd.DataFrame()
 
-    if movers:
-        mv_df = pd.DataFrame(movers).sort_values(by="Day%", ascending=False)
-        gc1, gc2 = st.columns(2)
-        with gc1:
-            st.markdown("#### 🟢 Top 3 Gainers")
-            st.dataframe(mv_df.head(3), width="stretch", hide_index=True)
-        with gc2:
-            st.markdown("#### 🔴 Top 3 Losers")
-            st.dataframe(mv_df.tail(3).sort_values(by="Day%", ascending=True), width="stretch", hide_index=True)
+    sec_brief_df = compute_sector_strength(scan_df) if not scan_df.empty else pd.DataFrame()
+    best_sec = f"{sec_brief_df.iloc[0]['Sector']} ({sec_brief_df.iloc[0]['Avg_RS%']:+.1f}%)" if not sec_brief_df.empty else "N/A"
+    worst_sec = f"{sec_brief_df.iloc[-1]['Sector']} ({sec_brief_df.iloc[-1]['Avg_RS%']:+.1f}%)" if len(sec_brief_df) > 1 else "N/A"
+
+    # 1. Executive 60-Second Verdict Box
+    with st.container(border=True):
+        st.markdown("#### Aaj Ka Market Summary (60 Seconds)")
+        if regime["is_bullish"] and mood["score"] < 70:
+            st.success(f"**Overall Mood:** Bullish & Healthy · {bench_name}: `{regime['close']:,.2f}` · MMI: `{mood['score']}/100 ({mood['zone']})`")
+        elif regime["is_bullish"] and mood["score"] >= 70:
+            st.warning(f"**Overall Mood:** Garam / Overheated · {bench_name}: `{regime['close']:,.2f}` · MMI: `{mood['score']}/100 ({mood['zone']})` — naye chase se bacho.")
+        else:
+            st.error(f"**Overall Mood:** Weak / Defensive · {bench_name}: `{regime['close']:,.2f}` · MMI: `{mood['score']}/100 ({mood['zone']})` — Cash / Gold Shield safe rakho.")
+
+        st.markdown(
+            f"- **Market Breadth:** `{br['above_ema50']} / {br['total']}` assets (`{br['pct_ema50']}%`) uptrend (`EMA50` ke upar) mein hain — *{br['label']}*.\n"
+            f"- **Sabse Strong Sector:** **{best_sec}** &nbsp;|&nbsp; **Sabse Weak Sector:** **{worst_sec}**.\n"
+            f"- **Action Tip:** {mood['tip']}"
+        )
+
+    # 2. Kisko Dekhna Chahiye (Watch/Strong) vs Kisko Avoid Karein (Weak)
+    col_watch, col_avoid = st.columns(2)
+    with col_watch:
+        with st.container(border=True):
+            st.markdown("#### 🟢 Kisko Dekhna Chahiye (Strongest)")
+            if not scan_df.empty:
+                strong_picks = scan_df[scan_df["Score"] >= 60].head(4)
+                if strong_picks.empty:
+                    strong_picks = scan_df.head(3)
+                for _, r in strong_picks.iterrows():
+                    st.markdown(
+                        f"- **{r['Ticker']}** ({r['Sector']}) — Score **`{r['Score']}/100`**, RS `{r['RS_vs_Bench']:+.1f}%` · _{r['Setup']}_"
+                    )
+            else:
+                st.caption("No scan data available.")
+
+    with col_avoid:
+        with st.container(border=True):
+            st.markdown("#### 🔴 Kisko Avoid Karna Chahiye (Weakest)")
+            if not scan_df.empty:
+                weak_picks = scan_df.sort_values(by=["Score", "RS_vs_Bench"], ascending=[True, True]).head(4)
+                for _, r in weak_picks.iterrows():
+                    st.markdown(
+                        f"- **{r['Ticker']}** ({r['Sector']}) — Score **`{r['Score']}/100`**, RS `{r['RS_vs_Bench']:+.1f}%` · _{r['Status']}_"
+                    )
+            else:
+                st.caption("No scan data available.")
+
+    if not mv_df.empty:
+        mc1, mc2 = st.columns(2)
+        with mc1:
+            top_g = mv_df.head(3)
+            g_str = " · ".join(f"**{r['Ticker']}** (`{r['Day%']:+.2f}%`)" for _, r in top_g.iterrows())
+            st.info(f"**Aaj Ke Top Gainers:** {g_str}")
+        with mc2:
+            top_l = mv_df.tail(3).sort_values(by="Day%", ascending=True)
+            l_str = " · ".join(f"**{r['Ticker']}** (`{r['Day%']:+.2f}%`)" for _, r in top_l.iterrows())
+            st.warning(f"**Aaj Ke Top Losers:** {l_str}")
 
     st.divider()
 
-    # 3. Live Market News Feed (Google News RSS)
-    st.subheader(f"Live {market_mode.split(' (')[0]} News Feed")
+    # 3. Important Market Updates (Link-Free Readable Cards!)
+    st.subheader("Important Market Updates (No Links — Read Right Here)")
     if use_demo_mode:
-        st.info("Turn off Offline Demo Data Mode in the sidebar to load live market headlines.")
+        st.caption("Offline Demo Data Mode ON hai — live updates padhne ke liye sidebar mein Demo Mode OFF karo.")
     else:
         news_items = fetch_market_news_feed(market_mode)
         if news_items:
             caut_n = sum(1 for x in news_items if x["tag"] == "CAUTION")
             pos_n = sum(1 for x in news_items if x["tag"] == "POSITIVE")
-            st.caption(f"Headline Sentiment Snapshot: 🟢 {pos_n} Positive · 🔴 {caut_n} Caution · ⚪ {len(news_items) - pos_n - caut_n} Neutral")
+            st.caption(f"Quick Pulse: 🟢 {pos_n} Positive · 🔴 {caut_n} Caution · ⚪ {len(news_items) - pos_n - caut_n} Neutral")
             for item in news_items:
-                badge = "🔴" if item["tag"] == "CAUTION" else ("🟢" if item["tag"] == "POSITIVE" else "⚪")
+                tag_lbl = "🔴 CAUTION" if item["tag"] == "CAUTION" else ("🟢 POSITIVE" if item["tag"] == "POSITIVE" else "⚪ UPDATE")
                 with st.container(border=True):
-                    if item["link"]:
-                        st.markdown(f"{badge} **[{item['title']}]({item['link']})**")
-                    else:
-                        st.markdown(f"{badge} **{item['title']}**")
+                    st.markdown(f"**{tag_lbl} · {item['title']}**")
+                    if item.get("summary"):
+                        st.write(item["summary"])
                     st.caption(f"{item['publisher']} · {item['date']}")
         else:
-            st.caption("Live headlines abhi fetch nahi ho payin—thodi der baad Refresh dabao.")
+            st.caption("Abhi koi fresh update load nahi hui — thodi der baad Refresh dabao.")
