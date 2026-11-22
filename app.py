@@ -16,7 +16,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from alerts import format_signal_message, send_telegram_alert
-from journal_sync import is_cloud_sync_configured, pull_journal_from_github, push_journal_to_github
+from journal_sync import check_and_apply_gtt_exits, is_cloud_sync_configured, pull_journal_from_github, push_journal_to_github
 from market_intel import compute_market_mood, get_company_health
 from news_shield import fetch_market_news_feed, get_news_shield
 from backtest import (
@@ -80,10 +80,20 @@ def init_paper_db() -> None:
                 status TEXT NOT NULL DEFAULT 'OPEN',
                 exit_date TEXT,
                 exit_price REAL,
-                realized_pnl REAL DEFAULT 0.0
+                realized_pnl REAL DEFAULT 0.0,
+                net_pnl_pct REAL DEFAULT 0.0,
+                result TEXT DEFAULT 'OPEN'
             )
             """
         )
+        for col_sql in (
+            "ALTER TABLE paper_trades ADD COLUMN net_pnl_pct REAL DEFAULT 0.0",
+            "ALTER TABLE paper_trades ADD COLUMN result TEXT DEFAULT 'OPEN'",
+        ):
+            try:
+                conn.execute(col_sql)
+            except sqlite3.OperationalError:
+                pass
         conn.commit()
 
 
@@ -177,14 +187,18 @@ def close_paper_trade(trade_id: int, exit_price: float) -> None:
         if not row:
             return
         entry_p, qty = float(row[0]), float(row[1])
-        pnl = (float(exit_price) - entry_p) * qty
+        exit_p = float(exit_price)
+        charges = (entry_p * qty) * 0.0015  # 0.15% brokerage + STT + slippage
+        net_pnl = round(((exit_p - entry_p) * qty) - charges, 2)
+        net_pnl_pct = round((((exit_p - entry_p) / entry_p) * 100.0) - 0.15, 2) if entry_p > 0 else 0.0
+        res_lbl = "WIN" if net_pnl > 0 else "LOSS"
         conn.execute(
             """
             UPDATE paper_trades
-            SET status = 'CLOSED', exit_date = ?, exit_price = ?, realized_pnl = ?
+            SET status = 'CLOSED', exit_date = ?, exit_price = ?, realized_pnl = ?, net_pnl_pct = ?, result = ?
             WHERE id = ?
             """,
-            (datetime.now().strftime("%Y-%m-%d %H:%M"), round(float(exit_price), 2), round(pnl, 2), trade_id),
+            (datetime.now().strftime("%Y-%m-%d %H:%M"), round(exit_p, 2), net_pnl, net_pnl_pct, res_lbl, trade_id),
         )
         conn.commit()
     if is_cloud_sync_configured():
@@ -207,7 +221,8 @@ def restore_paper_trades_from_df(df: pd.DataFrame) -> int:
         return 0
     cols = [
         "ticker", "sector", "setup", "entry_date", "entry_price",
-        "stop_loss", "target", "qty", "status", "exit_date", "exit_price", "realized_pnl",
+        "stop_loss", "target", "qty", "status", "exit_date", "exit_price",
+        "realized_pnl", "net_pnl_pct", "result",
     ]
     valid = [c for c in cols if c in df.columns]
     if not {"ticker", "entry_price", "qty"}.issubset(set(valid)):
@@ -253,7 +268,7 @@ init_paper_db()
 if "cloud_journal_checked" not in st.session_state:
     st.session_state["cloud_journal_checked"] = True
     try:
-        if is_cloud_sync_configured() and load_paper_trades().empty:
+        if is_cloud_sync_configured():
             _cdf, _ = pull_journal_from_github()
             if _cdf is not None and not _cdf.empty:
                 restore_paper_trades_from_df(_cdf)
@@ -1058,6 +1073,26 @@ with tab4:
 # ----------------------------------------------------------------------------
 with tab5:
     paper_df = load_paper_trades()
+    if not paper_df.empty and not use_demo_mode:
+        updated_paper_df, gtt_events = check_and_apply_gtt_exits(paper_df, stock_data)
+        if gtt_events:
+            restore_paper_trades_from_df(updated_paper_df)
+            if is_cloud_sync_configured():
+                try:
+                    push_journal_to_github(
+                        load_paper_trades(),
+                        commit_msg=f"Auto-GTT close ({len(gtt_events)} trade(s))",
+                    )
+                except Exception:
+                    pass
+            paper_df = load_paper_trades()
+            for ev in gtt_events:
+                pct_s = f"{ev.get('net_pnl_pct', 0.0):+.2f}%"
+                res_s = ev.get("result", "")
+                if "TARGET" in ev["reason"]:
+                    st.success(f"🎯 {ev['reason']} ({res_s}): **{ev['ticker']}** auto-closed @ {curr}{ev['exit_price']:,.2f} | Net P&L (after 0.15% charges): {curr}{ev['realized_pnl']:+,.2f} ({pct_s})")
+                else:
+                    st.warning(f"🛑 {ev['reason']} ({res_s}): **{ev['ticker']}** auto-closed @ {curr}{ev['exit_price']:,.2f} | Net P&L (after 0.15% charges): {curr}{ev['realized_pnl']:+,.2f} ({pct_s})")
     open_df = paper_df[paper_df["status"] == "OPEN"] if not paper_df.empty else pd.DataFrame()
     closed_df = paper_df[paper_df["status"] == "CLOSED"] if not paper_df.empty else pd.DataFrame()
 
@@ -1132,6 +1167,7 @@ with tab5:
 
     # Open Positions Management
     st.subheader("Open Paper Positions")
+    st.caption("Auto-GTT Active: SL ya Target touch hote hi position apne aap close hoke GitHub Cloud mein save ho jayegi (Manual Close bhi available hai).")
     if open_df.empty:
         st.caption("Zero open positions.")
     else:
