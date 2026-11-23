@@ -32,6 +32,7 @@ CRYPTO_BENCHMARK = "BTC-USD"
 GLOBAL_BENCHMARK = "SPY"
 
 DEFAULT_WATCHLIST: List[str] = [
+    # Core 22 Growth Leaders + Precious Metals ETFs
     "TRENT.NS",
     "HAL.NS",
     "BEL.NS",
@@ -54,6 +55,37 @@ DEFAULT_WATCHLIST: List[str] = [
     "POWERGRID.NS",
     "GOLDBEES.NS",
     "SILVERBEES.NS",
+    # Top 30 Liquid Nifty 50 Bluechips (Total: 52 NSE Assets)
+    "HDFCBANK.NS",
+    "KOTAKBANK.NS",
+    "AXISBANK.NS",
+    "INDUSINDBK.NS",
+    "BAJAJFINSV.NS",
+    "SHRIRAMFIN.NS",
+    "JIOFIN.NS",
+    "SBILIFE.NS",
+    "HDFCLIFE.NS",
+    "TCS.NS",
+    "INFY.NS",
+    "HCLTECH.NS",
+    "TECHM.NS",
+    "WIPRO.NS",
+    "MARUTI.NS",
+    "BAJAJ-AUTO.NS",
+    "EICHERMOT.NS",
+    "CIPLA.NS",
+    "DRREDDY.NS",
+    "APOLLOHOSP.NS",
+    "ITC.NS",
+    "HINDUNILVR.NS",
+    "NESTLEIND.NS",
+    "TITAN.NS",
+    "ASIANPAINT.NS",
+    "ULTRACEMCO.NS",
+    "TATASTEEL.NS",
+    "HINDALCO.NS",
+    "JSWSTEEL.NS",
+    "ONGC.NS",
 ]
 
 DEFAULT_CRYPTO_WATCHLIST: List[str] = [
@@ -136,6 +168,22 @@ SECTOR_MAP: Dict[str, str] = {
     "CUMMINSIND.NS": "Capital Goods",
     "POWERGRID.NS": "Power",
     "QQQ": "US Tech",
+    "INDUSINDBK.NS": "Banking",
+    "BAJAJFINSV.NS": "Finance",
+    "SHRIRAMFIN.NS": "Finance",
+    "JIOFIN.NS": "Finance",
+    "SBILIFE.NS": "Insurance",
+    "HDFCLIFE.NS": "Insurance",
+    "BAJAJ-AUTO.NS": "Auto",
+    "EICHERMOT.NS": "Auto",
+    "CIPLA.NS": "Pharma",
+    "APOLLOHOSP.NS": "Healthcare",
+    "NESTLEIND.NS": "FMCG",
+    "ASIANPAINT.NS": "Consumer",
+    "ULTRACEMCO.NS": "Cement",
+    "TATASTEEL.NS": "Metals",
+    "HINDALCO.NS": "Metals",
+    "JSWSTEEL.NS": "Metals",
 }
 
 
