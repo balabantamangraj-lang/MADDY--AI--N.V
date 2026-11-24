@@ -622,11 +622,12 @@ with tab2:
     bars_to_show = bars_map[range_choice]
 
     # TradingView-style compact layer toggles
-    tg1, tg2, tg3, tg4 = st.columns(4)
+    tg1, tg2, tg3, tg4, tg5 = st.columns(5)
     show_ema = tg1.checkbox("EMA 20/50", value=True, key="tv_ema")
     show_fvg = tg2.checkbox("FVG Zones", value=True, key="tv_fvg")
     show_gaps = tg3.checkbox("Market Gaps", value=True, key="tv_gaps")
     show_vol = tg4.checkbox("Volume", value=True, key="tv_vol")
+    show_levels = tg5.checkbox("TP / SL", value=True, key="tv_levels")
 
     df_full = add_indicators(stock_data[selected_ticker])
     df_chart = df_full.tail(bars_to_show)
@@ -787,6 +788,103 @@ with tab2:
         row=1,
         col=1,
     )
+
+    # Active Paper Trade (or READY Signal) Entry / SL / TP Lines
+    if show_levels:
+        _chart_trade_level = None
+        try:
+            _p_all = load_paper_trades()
+            if not _p_all.empty:
+                _p_open = _p_all[
+                    (_p_all["ticker"] == selected_ticker)
+                    & (_p_all["status"].astype(str).str.upper() == "OPEN")
+                ]
+                if not _p_open.empty:
+                    _tr = _p_open.iloc[0]
+                    _chart_trade_level = {
+                        "mode": "OPEN",
+                        "entry": safe_float(_tr["entry_price"]),
+                        "sl": safe_float(_tr["stop_loss"]),
+                        "tp": safe_float(_tr["target"]),
+                        "qty": safe_float(_tr["qty"]),
+                    }
+        except Exception:
+            _chart_trade_level = None
+
+        if _chart_trade_level is None and not scan_df.empty:
+            _s_match = scan_df[(scan_df["Ticker"] == selected_ticker) & (scan_df["Status"] == "READY")]
+            if not _s_match.empty:
+                _sr = _s_match.iloc[0]
+                _chart_trade_level = {
+                    "mode": "READY",
+                    "entry": safe_float(_sr["Entry"]),
+                    "sl": safe_float(_sr["StopLoss"]),
+                    "tp": safe_float(_sr["Target"]),
+                    "qty": safe_float(_sr.get("Qty (1% Risk)", 0)),
+                }
+
+        if _chart_trade_level is not None and _chart_trade_level["entry"] > 0:
+            _is_open = _chart_trade_level["mode"] == "OPEN"
+            _e_lbl = "Entry" if _is_open else "Plan Entry"
+            _sl_lbl = "SL" if _is_open else "Plan SL"
+            _tp_lbl = "TP" if _is_open else "Plan TP"
+
+            if _chart_trade_level["tp"] > 0:
+                fig.add_hline(
+                    y=_chart_trade_level["tp"],
+                    line_dash="dash",
+                    line_color="#26a69a",
+                    line_width=1.6,
+                    annotation_text=f" {_tp_lbl} {curr}{_chart_trade_level['tp']:,.2f} ",
+                    annotation_position="left",
+                    annotation_bgcolor="rgba(38, 166, 154, 0.90)",
+                    annotation_font_color="#ffffff",
+                    annotation_font_size=10,
+                    row=1,
+                    col=1,
+                )
+            fig.add_hline(
+                y=_chart_trade_level["entry"],
+                line_dash="solid" if _is_open else "dot",
+                line_color="#2962ff",
+                line_width=1.6,
+                annotation_text=f" {_e_lbl} {curr}{_chart_trade_level['entry']:,.2f} ",
+                annotation_position="left",
+                annotation_bgcolor="rgba(41, 98, 255, 0.90)",
+                annotation_font_color="#ffffff",
+                annotation_font_size=10,
+                row=1,
+                col=1,
+            )
+            if _chart_trade_level["sl"] > 0:
+                fig.add_hline(
+                    y=_chart_trade_level["sl"],
+                    line_dash="dash",
+                    line_color="#ef5350",
+                    line_width=1.6,
+                    annotation_text=f" {_sl_lbl} {curr}{_chart_trade_level['sl']:,.2f} ",
+                    annotation_position="left",
+                    annotation_bgcolor="rgba(239, 83, 80, 0.90)",
+                    annotation_font_color="#ffffff",
+                    annotation_font_size=10,
+                    row=1,
+                    col=1,
+                )
+            if _is_open:
+                _live_pnl = (ltp - _chart_trade_level["entry"]) * _chart_trade_level["qty"]
+                st.caption(
+                    f"📌 **Active Paper Position:** Qty `{_chart_trade_level['qty']}` · "
+                    f"Entry `{curr}{_chart_trade_level['entry']:,.2f}` · "
+                    f"SL `{curr}{_chart_trade_level['sl']:,.2f}` · "
+                    f"TP `{curr}{_chart_trade_level['tp']:,.2f}` · "
+                    f"Live P&L: **{curr}{_live_pnl:+,.2f}**"
+                )
+            else:
+                st.caption(
+                    f"🎯 **READY Signal Levels:** Plan Entry `{curr}{_chart_trade_level['entry']:,.2f}` · "
+                    f"SL `{curr}{_chart_trade_level['sl']:,.2f}` · "
+                    f"TP `{curr}{_chart_trade_level['tp']:,.2f}`"
+                )
 
     # Overlay Backtest Buy / Sell Markers
     if "trade_log" in bt_results and not bt_results["trade_log"].empty:
