@@ -756,9 +756,10 @@ with tab2:
 
     last_dt = df_chart.index[-1]
 
-    # Plot Bullish/Bearish FVG Boxes + 50% Midpoint Line
+    # Plot Bullish/Bearish FVG Boxes + 50% Midpoint Line (only 3 most recent fresh zones)
     if show_fvg:
-        for z in fvg_zones[-8:]:
+        fresh_fvgs = [z for z in fvg_zones if z.get("is_fresh", True)][-3:]
+        for z in fresh_fvgs:
             is_bull = z["type"] == "Bullish FVG"
             fill_col = "rgba(38, 166, 154, 0.16)" if is_bull else "rgba(239, 83, 80, 0.16)"
             line_col = "rgba(38, 166, 154, 0.65)" if is_bull else "rgba(239, 83, 80, 0.65)"
@@ -784,9 +785,10 @@ with tab2:
                 col=1,
             )
 
-    # Plot Market Gap Zones
+    # Plot Market Gap Zones (only 2 most recent unfilled gaps)
     if show_gaps:
-        for g in gap_zones[-6:]:
+        unfilled_gaps = [g for g in gap_zones if not g.get("filled", False)][-2:]
+        for g in unfilled_gaps:
             g_col = "rgba(41, 98, 255, 0.20)" if g["direction"] == "Gap Up" else "rgba(255, 152, 0, 0.20)"
             fig.add_shape(
                 type="rect",
@@ -862,7 +864,7 @@ with tab2:
                     line_color="#26a69a",
                     line_width=1.6,
                     annotation_text=f" {_tp_lbl} {curr}{_chart_trade_level['tp']:,.2f} ",
-                    annotation_position="left",
+                    annotation_position="top left",
                     annotation_bgcolor="rgba(38, 166, 154, 0.90)",
                     annotation_font_color="#ffffff",
                     annotation_font_size=10,
@@ -875,7 +877,7 @@ with tab2:
                 line_color="#2962ff",
                 line_width=1.6,
                 annotation_text=f" {_e_lbl} {curr}{_chart_trade_level['entry']:,.2f} ",
-                annotation_position="left",
+                annotation_position="top left",
                 annotation_bgcolor="rgba(41, 98, 255, 0.90)",
                 annotation_font_color="#ffffff",
                 annotation_font_size=10,
@@ -889,7 +891,7 @@ with tab2:
                     line_color="#ef5350",
                     line_width=1.6,
                     annotation_text=f" {_sl_lbl} {curr}{_chart_trade_level['sl']:,.2f} ",
-                    annotation_position="left",
+                    annotation_position="bottom left",
                     annotation_bgcolor="rgba(239, 83, 80, 0.90)",
                     annotation_font_color="#ffffff",
                     annotation_font_size=10,
@@ -953,18 +955,32 @@ with tab2:
                     col=1,
                 )
 
+    # Auto-pad Y-axis so TP & SL lines are never cut off at top/bottom
+    _y_lows = [float(df_chart["Low"].min())]
+    _y_highs = [float(df_chart["High"].max())]
+    if show_levels and "_chart_trade_level" in locals() and _chart_trade_level is not None:
+        if _chart_trade_level.get("sl", 0) > 0:
+            _y_lows.append(float(_chart_trade_level["sl"]))
+        if _chart_trade_level.get("tp", 0) > 0:
+            _y_highs.append(float(_chart_trade_level["tp"]))
+    _ymin, _ymax = min(_y_lows), max(_y_highs)
+    _ypad = max((_ymax - _ymin) * 0.08, _ymax * 0.01)
+
     fig.update_layout(
-        height=560,
+        height=520,
         template="plotly_dark",
         paper_bgcolor="#131722",
         plot_bgcolor="#131722",
         font=dict(color="#d1d4dc", family="Inter, sans-serif", size=11),
         hovermode="x unified",
         xaxis_rangeslider_visible=False,
-        margin=dict(l=8, r=58, t=16, b=10),
+        margin=dict(l=10, r=68, t=18, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0, bgcolor="rgba(0,0,0,0)"),
         dragmode="pan",
     )
+    fig.update_yaxes(range=[_ymin - _ypad, _ymax + _ypad], row=1, col=1)
+    if not is_crypto:
+        fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
     fig.update_xaxes(
         gridcolor="#1e222d",
         showline=True,
