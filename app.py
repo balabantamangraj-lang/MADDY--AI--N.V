@@ -103,6 +103,13 @@ def load_paper_trades() -> pd.DataFrame:
         return pd.read_sql_query("SELECT * FROM paper_trades ORDER BY id DESC", conn)
 
 
+
+def jump_to_chart(ticker: str) -> None:
+    st.session_state["chart_symbol_select"] = ticker
+    st.session_state["_jump_to_chart_tab"] = True
+    st.rerun()
+
+
 def style_tradingview(fig: go.Figure, height: int = 440, right_axis: bool = True, show_crosshair: bool = True) -> go.Figure:
     """Apply consistent TradingView Pro Dark styling (#131722 canvas, crisp grids, right price axis)."""
     fig.update_layout(
@@ -542,7 +549,21 @@ with tab1:
         )
 
         st.subheader("Live Signal Table")
-        st.dataframe(scan_df, width="stretch", hide_index=True)
+        st.caption("Kisi bhi stock ki row par tap karo ya neeche **📉 Chart** dabao — seedha Smart Chart mein khulega.")
+        _tbl_evt = st.dataframe(
+            scan_df,
+            width="stretch",
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="scan_table_sel",
+        )
+        _sel_rows = _tbl_evt.selection.rows if (_tbl_evt and hasattr(_tbl_evt, "selection")) else []
+        if _sel_rows:
+            _picked_t = str(scan_df.iloc[_sel_rows[0]]["Ticker"])
+            if st.session_state.get("_last_table_picked") != _picked_t:
+                st.session_state["_last_table_picked"] = _picked_t
+                jump_to_chart(_picked_t)
 
         # Upgrade #2: Sector Strength Radar (Top-Down Filter)
         sec_df = compute_sector_strength(scan_df)
@@ -589,7 +610,7 @@ with tab1:
                         st.write(f"**{risk_per_trade_pct:.2f}% Risk Qty:** `{qty}` {'units' if allow_frac else 'shares'} (Cost: **{curr}{pos_cost:,.0f}**)")
                         st.caption(f"Max Risk: {curr}{max_risk_amt:,.0f} · Est. Reward: {curr}{est_reward_amt:,.0f}")
 
-                        b1, b2 = st.columns(2)
+                        b1, b2, b3 = st.columns(3)
                         if b1.button("Paper Buy", key=f"pb_{row['Ticker']}", width="stretch"):
                             if qty > 0:
                                 add_paper_trade(
@@ -610,13 +631,18 @@ with tab1:
                             else:
                                 st.info(info)
                                 st.code(msg, language="text")
+                        if b3.button("📉 Chart", key=f"ch_{row['Ticker']}", width="stretch"):
+                            jump_to_chart(str(row["Ticker"]))
 
 # ----------------------------------------------------------------------------
 # TAB 2: INTERACTIVE SMART CHARTS (TRADINGVIEW PRO STYLE)
 # ----------------------------------------------------------------------------
 with tab2:
     c_sel, c_rng = st.columns([2, 1])
-    selected_ticker = c_sel.selectbox("Select Symbol", options=list(stock_data.keys()))
+    _avail_syms = list(stock_data.keys())
+    if st.session_state.get("chart_symbol_select") not in _avail_syms and _avail_syms:
+        st.session_state["chart_symbol_select"] = _avail_syms[0]
+    selected_ticker = c_sel.selectbox("Select Symbol", options=_avail_syms, key="chart_symbol_select")
     range_choice = c_rng.selectbox("Range", options=["1M (22D)", "3M (65D)", "6M (130D)", "1Y (252D)"], index=1)
     bars_map = {"1M (22D)": 22, "3M (65D)": 65, "6M (130D)": 130, "1Y (252D)": 252}
     bars_to_show = bars_map[range_choice]
@@ -1272,10 +1298,12 @@ with tab5:
         for _, r in open_df.iterrows():
             ltp = latest_prices.get(r["ticker"], float(r["entry_price"]))
             u_pnl = (ltp - float(r["entry_price"])) * float(r["qty"])
-            c_info, c_act = st.columns([4, 1])
+            c_info, c_ch, c_act = st.columns([3.5, 1, 1])
             c_info.write(
                 f"**{r['ticker']}** ({r['sector']}) · Qty `{r['qty']}` · Entry {curr}{r['entry_price']:,.2f} · LTP {curr}{ltp:,.2f} · SL {curr}{r['stop_loss']:,.2f} · Target {curr}{r['target']:,.2f} · **P&L: {curr}{u_pnl:+,.2f}**"
             )
+            if c_ch.button("📉 Chart", key=f"p5_ch_{r['id']}", width="stretch"):
+                jump_to_chart(str(r["ticker"]))
             if c_act.button("Close @ LTP", key=f"close_{r['id']}", width="stretch"):
                 close_paper_trade(int(r["id"]), ltp)
                 st.rerun()
@@ -1421,3 +1449,16 @@ with tab6:
                     st.caption(f"{item['publisher']} · {item['date']}")
         else:
             st.caption("Abhi koi fresh update load nahi hui — thodi der baad Refresh dabao.")
+
+if st.session_state.pop("_jump_to_chart_tab", False):
+    components.html(
+        """
+        <script>
+        const tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
+        if (tabs && tabs.length > 1) {
+            tabs[1].click();
+        }
+        </script>
+        """,
+        height=0,
+    )
