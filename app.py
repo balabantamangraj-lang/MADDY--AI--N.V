@@ -105,7 +105,7 @@ def load_paper_trades() -> pd.DataFrame:
 
 
 def jump_to_chart(ticker: str) -> None:
-    st.session_state["chart_symbol_select"] = ticker
+    st.session_state["_pending_chart_symbol"] = ticker
     st.session_state["_jump_to_chart_tab"] = True
     st.rerun()
 
@@ -640,6 +640,10 @@ with tab1:
 with tab2:
     c_sel, c_rng = st.columns([2, 1])
     _avail_syms = list(stock_data.keys())
+    if "_pending_chart_symbol" in st.session_state:
+        _pend_sym = st.session_state.pop("_pending_chart_symbol")
+        if _pend_sym in _avail_syms:
+            st.session_state["chart_symbol_select"] = _pend_sym
     if st.session_state.get("chart_symbol_select") not in _avail_syms and _avail_syms:
         st.session_state["chart_symbol_select"] = _avail_syms[0]
     selected_ticker = c_sel.selectbox("Select Symbol", options=_avail_syms, key="chart_symbol_select")
