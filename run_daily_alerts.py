@@ -19,6 +19,7 @@ from journal_sync import (
     append_signals_to_github,
     check_and_apply_gtt_exits,
     is_cloud_sync_configured,
+    log_activity,
     pull_journal_from_github,
     push_journal_to_github,
 )
@@ -53,6 +54,7 @@ def run_background_gtt_check(ist_now: str, preloaded_data: dict | None = None) -
     updated_df, closed_events = check_and_apply_gtt_exits(journal_df, price_data)
     if not closed_events:
         print(f"GTT check ({ist_now}): {len(open_df)} open position(s) checked — no SL/Target hit.")
+        log_activity("GTT_CHECK", "ALL", f"Checked {len(open_df)} open trade(s) — no SL/Target hit", source="BOT")
         return
 
     ok_push, push_msg = push_journal_to_github(
@@ -76,6 +78,12 @@ def run_background_gtt_check(ist_now: str, preloaded_data: dict | None = None) -
         )
         ok_tg, info_tg = send_telegram_alert(alert_msg)
         print(f"Sent GTT Telegram alert for {ev['ticker']}:", ok_tg, info_tg)
+        log_activity(
+            ev["reason"].replace(" ", "_"),
+            str(ev["ticker"]),
+            f"Auto-closed @ {curr}{ev['exit_price']:,.2f} | Net P&L: {curr}{ev['realized_pnl']:+,.2f} ({net_pct:+.2f}%)",
+            source="BOT_GTT",
+        )
 
 
 def main() -> None:
@@ -128,6 +136,7 @@ def main() -> None:
         msg = f"{header}\nNo READY signals (Score >= 75) today.\nTop Watchlist:\n{watch_lines}"
         ok, info = send_telegram_alert(msg)
         print("Sent no-signal summary:", ok, info)
+        log_activity("DAILY_SCAN", "NIFTY50", f"Regime {regime['label']} | 0 READY signals", source="BOT")
         return
 
     risk_cfg = RiskConfig()
@@ -151,6 +160,13 @@ def main() -> None:
                 "Target": round(float(row["Target"]), 2),
                 "Status": "OPEN",
             }
+        )
+    if sig_rows:
+        log_activity(
+            "DAILY_SCAN",
+            ",".join(r["Ticker"] for r in sig_rows[:5]),
+            f"Regime {regime['label']} | {len(sig_rows)} READY signal(s)",
+            source="BOT",
         )
     if sig_rows and is_cloud_sync_configured():
         ok_sig, msg_sig = append_signals_to_github(pd.DataFrame(sig_rows))

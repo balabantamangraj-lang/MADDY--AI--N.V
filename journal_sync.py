@@ -24,6 +24,8 @@ except ImportError:
 
 JOURNAL_REPO_PATH = "paper_trades_journal.csv"
 SIGNALS_REPO_PATH = "daily_signals_log.csv"
+ACTIVITY_REPO_PATH = "activity_log.csv"
+LOCAL_ACTIVITY_PATH = "maddy_activity_log.csv"
 ROUND_TRIP_COST_PCT = 0.0015  # 0.15% brokerage + STT + slippage
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -294,3 +296,115 @@ def append_signals_to_github(new_signals_df: pd.DataFrame) -> Tuple[bool, str]:
             return False, f"GitHub signals log returned status {resp.status}"
     except Exception as exc:
         return False, f"GitHub signals log failed: {exc}"
+
+
+def _github_get_csv(repo_path: str) -> Tuple[Optional[pd.DataFrame], Optional[str]]:
+    token = _get_secret("GITHUB_TOKEN")
+    repo = _get_secret("GITHUB_REPO")
+    if not token or not repo:
+        return None, None
+    api_url = f"https://api.github.com/repos/{repo}/contents/{repo_path}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "MaddyAI-Terminal",
+    }
+    try:
+        req = urllib.request.Request(api_url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            meta = json.loads(resp.read().decode("utf-8"))
+            raw = base64.b64decode(meta["content"]).decode("utf-8")
+            return pd.read_csv(io.StringIO(raw)), meta.get("sha")
+    except Exception:
+        return None, None
+
+
+def log_activity(
+    event_type: str,
+    ticker: str = "-",
+    details: str = "",
+    source: str = "APP",
+) -> Tuple[bool, str]:
+    """Record every Maddy AI event locally and sync to activity_log.csv on GitHub Cloud."""
+    ts_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+    new_row = pd.DataFrame(
+        [
+            {
+                "Timestamp_IST": ts_ist,
+                "Source": source,
+                "Event": event_type,
+                "Ticker": ticker,
+                "Details": details,
+            }
+        ]
+    )
+
+    local_df = pd.DataFrame()
+    if os.path.exists(LOCAL_ACTIVITY_PATH):
+        try:
+            local_df = pd.read_csv(LOCAL_ACTIVITY_PATH)
+        except Exception:
+            local_df = pd.DataFrame()
+
+    cloud_df = None
+    sha = None
+    if is_cloud_sync_configured():
+        cloud_df, sha = _github_get_csv(ACTIVITY_REPO_PATH)
+
+    frames = [df for df in (cloud_df, local_df, new_row) if df is not None and not df.empty]
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.drop_duplicates(subset=["Timestamp_IST", "Event", "Ticker", "Details"], keep="last")
+    combined = combined.tail(300).reset_index(drop=True)
+
+    try:
+        combined.to_csv(LOCAL_ACTIVITY_PATH, index=False)
+    except Exception:
+        pass
+
+    if not is_cloud_sync_configured():
+        return True, "Logged locally."
+
+    token = _get_secret("GITHUB_TOKEN")
+    repo = _get_secret("GITHUB_REPO")
+    api_url = f"https://api.github.com/repos/{repo}/contents/{ACTIVITY_REPO_PATH}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "MaddyAI-Terminal",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "message": f"Log activity: {event_type} ({ticker})",
+        "content": base64.b64encode(combined.to_csv(index=False).encode("utf-8")).decode("utf-8"),
+    }
+    if sha:
+        payload["sha"] = sha
+
+    try:
+        req_put = urllib.request.Request(
+            api_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="PUT",
+        )
+        with urllib.request.urlopen(req_put, timeout=10) as resp:
+            if resp.status in (200, 201):
+                return True, "Activity synced to GitHub cloud."
+            return False, f"GitHub status {resp.status}"
+    except Exception as exc:
+        return False, f"Activity cloud sync skipped: {exc}"
+
+
+def fetch_activity_log(limit: int = 40) -> pd.DataFrame:
+    """Return latest activity rows from GitHub Cloud (or local fallback), newest first."""
+    df = None
+    if is_cloud_sync_configured():
+        df, _ = _github_get_csv(ACTIVITY_REPO_PATH)
+    if (df is None or df.empty) and os.path.exists(LOCAL_ACTIVITY_PATH):
+        try:
+            df = pd.read_csv(LOCAL_ACTIVITY_PATH)
+        except Exception:
+            df = None
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["Timestamp_IST", "Source", "Event", "Ticker", "Details"])
+    return df.iloc[::-1].head(limit).reset_index(drop=True)

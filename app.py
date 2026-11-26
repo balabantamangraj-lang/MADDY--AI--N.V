@@ -16,7 +16,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from alerts import format_signal_message, send_telegram_alert
-from journal_sync import check_and_apply_gtt_exits, is_cloud_sync_configured, pull_journal_from_github, push_journal_to_github
+from journal_sync import check_and_apply_gtt_exits, fetch_activity_log, is_cloud_sync_configured, log_activity, pull_journal_from_github, push_journal_to_github
 from market_intel import compute_market_mood, get_company_health
 from news_shield import fetch_market_news_feed, get_news_shield
 from backtest import (
@@ -622,11 +622,24 @@ with tab1:
                                     target=row["Target"],
                                     qty=qty,
                                 )
+                                try:
+                                    log_activity(
+                                        "PAPER_BUY",
+                                        str(row["Ticker"]),
+                                        f"Qty {qty} @ {curr}{row['Entry']:,.2f} | SL {curr}{row['StopLoss']:,.2f} | TP {curr}{row['Target']:,.2f}",
+                                        source="APP",
+                                    )
+                                except Exception:
+                                    pass
                                 st.toast(f"Paper trade logged for {row['Ticker']} ({qty} qty)!")
                         if b2.button("Telegram", key=f"tg_{row['Ticker']}", width="stretch"):
                             msg = format_signal_message(row.to_dict(), qty)
                             ok, info = send_telegram_alert(msg)
                             if ok:
+                                try:
+                                    log_activity("TELEGRAM_SENT", str(row["Ticker"]), f"Manual alert sent (Qty {qty})", source="APP")
+                                except Exception:
+                                    pass
                                 st.success(info)
                             else:
                                 st.info(info)
@@ -1231,6 +1244,15 @@ with tab5:
                     pass
             paper_df = load_paper_trades()
             for ev in gtt_events:
+                try:
+                    log_activity(
+                        ev["reason"].replace(" ", "_"),
+                        str(ev["ticker"]),
+                        f"Exit @ {curr}{ev['exit_price']:,.2f} | Net P&L: {curr}{ev['realized_pnl']:+,.2f} ({ev.get('net_pnl_pct', 0.0):+.2f}%)",
+                        source="AUTO_GTT",
+                    )
+                except Exception:
+                    pass
                 pct_s = f"{ev.get('net_pnl_pct', 0.0):+.2f}%"
                 res_s = ev.get("result", "")
                 if "TARGET" in ev["reason"]:
@@ -1336,6 +1358,15 @@ with tab5:
                 jump_to_chart(str(r["ticker"]))
             if c_act.button("Close @ LTP", key=f"close_{r['id']}", width="stretch"):
                 close_paper_trade(int(r["id"]), ltp)
+                try:
+                    log_activity(
+                        "MANUAL_CLOSE",
+                        str(r["ticker"]),
+                        f"Closed @ {curr}{ltp:,.2f} (Entry {curr}{r['entry_price']:,.2f})",
+                        source="APP",
+                    )
+                except Exception:
+                    pass
                 st.rerun()
 
     # Closed Trades + CSV Backup + Reset
@@ -1380,6 +1411,20 @@ with tab5:
         if st.button("Reset Paper Portfolio"):
             reset_paper_db()
             st.rerun()
+
+    with st.expander("Activity History (Cloud & Bot Log)"):
+        st.caption("Har Scan, Paper Buy, Manual Close, Auto-GTT Exit aur Telegram Alert ka timestamped record.")
+        act_df = fetch_activity_log(limit=40)
+        if not act_df.empty:
+            st.dataframe(act_df, width="stretch", hide_index=True)
+            st.download_button(
+                "Download Activity Log (CSV)",
+                data=act_df.to_csv(index=False).encode("utf-8"),
+                file_name="maddy_ai_activity_log.csv",
+                mime="text/csv",
+            )
+        else:
+            st.caption("Abhi koi activity record nahi hai — agle trade ya bot run ke baad yahan dikhega.")
 
 
 # ----------------------------------------------------------------------------
