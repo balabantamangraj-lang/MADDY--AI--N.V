@@ -1359,10 +1359,32 @@ with tab5:
     else:
         for _, r in open_df.iterrows():
             ltp = latest_prices.get(r["ticker"], float(r["entry_price"]))
-            u_pnl = (ltp - float(r["entry_price"])) * float(r["qty"])
+            entry_v = float(r["entry_price"])
+            qty_v = float(r["qty"])
+            u_pnl = (ltp - entry_v) * qty_v
+            u_pct = ((ltp - entry_v) / entry_v * 100.0) if entry_v > 0 else 0.0
+            is_prof = u_pnl >= 0
+            acc_col = "#16a34a" if is_prof else "#dc2626"
+            bg_tint = "rgba(22, 163, 74, 0.12)" if is_prof else "rgba(220, 38, 38, 0.12)"
             c_info, c_ch, c_act = st.columns([3.5, 1, 1])
-            c_info.write(
-                f"**{r['ticker']}** ({r['sector']}) · Qty `{r['qty']}` · Entry {curr}{r['entry_price']:,.2f} · LTP {curr}{ltp:,.2f} · SL {curr}{r['stop_loss']:,.2f} · Target {curr}{r['target']:,.2f} · **P&L: {curr}{u_pnl:+,.2f}**"
+            c_info.markdown(
+                f"""
+                <div style="border-left:4px solid {acc_col};background:{bg_tint};border-radius:8px;padding:10px 12px;margin-bottom:4px;">
+                  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;">
+                    <div>
+                      <span style="font-size:15px;font-weight:700;">{r['ticker']}</span>
+                      <span style="font-size:12px;opacity:0.75;margin-left:6px;">{r['sector']} · Qty {qty_v}</span>
+                    </div>
+                    <div style="font-size:13px;font-weight:700;color:{acc_col};background:{bg_tint};border:1px solid {acc_col}55;padding:2px 9px;border-radius:999px;">
+                      {curr}{u_pnl:+,.2f} ({u_pct:+.2f}%)
+                    </div>
+                  </div>
+                  <div style="font-size:12px;opacity:0.88;margin-top:5px;">
+                    Entry <b>{curr}{entry_v:,.2f}</b> · LTP <b>{curr}{ltp:,.2f}</b> · SL <b style="color:#dc2626;">{curr}{float(r['stop_loss']):,.2f}</b> · TP <b style="color:#16a34a;">{curr}{float(r['target']):,.2f}</b>
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
             if c_ch.button("📉 Chart", key=f"p5_ch_{r['id']}", width="stretch"):
                 jump_to_chart(str(r["ticker"]))
