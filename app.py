@@ -613,6 +613,12 @@ with tab1:
                         b1, b2, b3 = st.columns(3)
                         if b1.button("Paper Buy", key=f"pb_{row['Ticker']}", width="stretch"):
                             if qty > 0:
+                                st.session_state["_confirm_pb_ticker"] = str(row["Ticker"])
+                        if st.session_state.get("_confirm_pb_ticker") == str(row["Ticker"]):
+                            st.warning(f"Confirm Paper Buy **{row['Ticker']}** ({qty} qty @ {curr}{row['Entry']:,.2f})?")
+                            cb1, cb2 = st.columns(2)
+                            if cb1.button("✅ Yes, Buy", key=f"pb_yes_{row['Ticker']}", width="stretch"):
+                                st.session_state.pop("_confirm_pb_ticker", None)
                                 add_paper_trade(
                                     ticker=row["Ticker"],
                                     sector=row["Sector"],
@@ -632,6 +638,10 @@ with tab1:
                                 except Exception:
                                     pass
                                 st.toast(f"Paper trade logged for {row['Ticker']} ({qty} qty)!")
+                                st.rerun()
+                            if cb2.button("❌ Cancel", key=f"pb_no_{row['Ticker']}", width="stretch"):
+                                st.session_state.pop("_confirm_pb_ticker", None)
+                                st.rerun()
                         if b2.button("Telegram", key=f"tg_{row['Ticker']}", width="stretch"):
                             msg = format_signal_message(row.to_dict(), qty)
                             ok, info = send_telegram_alert(msg)
@@ -1357,17 +1367,26 @@ with tab5:
             if c_ch.button("📉 Chart", key=f"p5_ch_{r['id']}", width="stretch"):
                 jump_to_chart(str(r["ticker"]))
             if c_act.button("Close @ LTP", key=f"close_{r['id']}", width="stretch"):
-                close_paper_trade(int(r["id"]), ltp)
-                try:
-                    log_activity(
-                        "MANUAL_CLOSE",
-                        str(r["ticker"]),
-                        f"Closed @ {curr}{ltp:,.2f} (Entry {curr}{r['entry_price']:,.2f})",
-                        source="APP",
-                    )
-                except Exception:
-                    pass
-                st.rerun()
+                st.session_state["_confirm_close_id"] = int(r["id"])
+            if st.session_state.get("_confirm_close_id") == int(r["id"]):
+                st.warning(f"Confirm Close **{r['ticker']}** @ {curr}{ltp:,.2f} (Est. P&L: {curr}{u_pnl:+,.2f})?")
+                cc1, cc2 = st.columns(2)
+                if cc1.button("✅ Yes, Close", key=f"cl_yes_{r['id']}", width="stretch"):
+                    st.session_state.pop("_confirm_close_id", None)
+                    close_paper_trade(int(r["id"]), ltp)
+                    try:
+                        log_activity(
+                            "MANUAL_CLOSE",
+                            str(r["ticker"]),
+                            f"Closed @ {curr}{ltp:,.2f} (Entry {curr}{r['entry_price']:,.2f})",
+                            source="APP",
+                        )
+                    except Exception:
+                        pass
+                    st.rerun()
+                if cc2.button("❌ Cancel", key=f"cl_no_{r['id']}", width="stretch"):
+                    st.session_state.pop("_confirm_close_id", None)
+                    st.rerun()
 
     # Closed Trades + CSV Backup + Reset
     with st.expander(f"Closed Paper Trades ({len(closed_df)}) & Permanent Cloud Journal"):
@@ -1409,8 +1428,17 @@ with tab5:
                 st.error(f"Could not read CSV: {exc}")
 
         if st.button("Reset Paper Portfolio"):
-            reset_paper_db()
-            st.rerun()
+            st.session_state["_confirm_reset_db"] = True
+        if st.session_state.get("_confirm_reset_db"):
+            st.error("Confirm Reset ALL Paper Trades? Isse saara local paper history clear ho jayega!")
+            cr1, cr2 = st.columns(2)
+            if cr1.button("✅ Yes, Reset All", key="reset_yes", width="stretch"):
+                st.session_state.pop("_confirm_reset_db", None)
+                reset_paper_db()
+                st.rerun()
+            if cr2.button("❌ Cancel", key="reset_no", width="stretch"):
+                st.session_state.pop("_confirm_reset_db", None)
+                st.rerun()
 
     with st.expander("Activity History (Cloud & Bot Log)"):
         st.caption("Har Scan, Paper Buy, Manual Close, Auto-GTT Exit aur Telegram Alert ka timestamped record.")
