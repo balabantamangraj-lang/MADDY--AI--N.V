@@ -432,17 +432,70 @@ risk_cfg = RiskConfig(
 )
 
 # Run backtest once per parameter set so Tab 2, Tab 3, Tab 4 share grounded results
-bt_results = run_portfolio_backtest(
-    stock_data=stock_data,
-    nifty_df=nifty_df,
-    initial_capital=float(capital),
-    sl_mult=sl_mult,
-    tp_mult=tp_mult,
-    strategy_mode=strategy_mode,
-    risk_config=risk_cfg,
-    max_atr_pct=max_atr_pct,
-    allow_fractional=allow_frac,
-    top_n=top_n_val,
+@st.cache_data(ttl=900, show_spinner=False)
+def _cached_run_backtest(
+    _cache_key: tuple,
+    _stock_data: Dict[str, pd.DataFrame],
+    _nifty_df: pd.DataFrame,
+    _capital: float,
+    _sl_mult: float,
+    _tp_mult: float,
+    _strategy_mode: str,
+    _eff_stock_cap: float,
+    _eff_heat_cap: float,
+    _risk_pct: float,
+    _max_atr_pct: float,
+    _allow_frac: bool,
+    _top_n: int,
+):
+    _rc = RiskConfig(
+        risk_per_trade_pct=_risk_pct / 100.0,
+        max_stock_alloc_pct=_eff_stock_cap,
+        max_portfolio_heat_pct=_eff_heat_cap,
+    )
+    return run_portfolio_backtest(
+        stock_data=_stock_data,
+        nifty_df=_nifty_df,
+        initial_capital=_capital,
+        sl_mult=_sl_mult,
+        tp_mult=_tp_mult,
+        strategy_mode=_strategy_mode,
+        risk_config=_rc,
+        max_atr_pct=_max_atr_pct,
+        allow_fractional=_allow_frac,
+        top_n=_top_n,
+    )
+
+_bt_last_dt = str(nifty_df.index[-1]) if not nifty_df.empty else "none"
+_bt_key = (
+    tuple(sorted(stock_data.keys())),
+    _bt_last_dt,
+    float(capital),
+    float(sl_mult),
+    float(tp_mult),
+    str(strategy_mode),
+    float(eff_stock_cap),
+    float(eff_heat_cap),
+    float(risk_per_trade_pct),
+    float(max_atr_pct),
+    bool(allow_frac),
+    int(top_n_val),
+    bool(use_demo_mode),
+)
+bt_results = _cached_run_backtest(
+    _bt_key,
+    stock_data,
+    nifty_df,
+    float(capital),
+    float(sl_mult),
+    float(tp_mult),
+    str(strategy_mode),
+    float(eff_stock_cap),
+    float(eff_heat_cap),
+    float(risk_per_trade_pct),
+    float(max_atr_pct),
+    bool(allow_frac),
+    int(top_n_val),
 )
 
 # ============================================================================
@@ -1483,7 +1536,10 @@ with tab5:
 
     with st.expander("Activity History (Cloud & Bot Log)"):
         st.caption("Har Scan, Paper Buy, Manual Close, Auto-GTT Exit aur Telegram Alert ka timestamped record.")
-        act_df = fetch_activity_log(limit=40)
+        @st.cache_data(ttl=60, show_spinner=False)
+        def _cached_activity_log():
+            return fetch_activity_log(limit=40)
+        act_df = _cached_activity_log()
         if not act_df.empty:
             st.dataframe(act_df, width="stretch", hide_index=True)
             st.download_button(
