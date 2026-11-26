@@ -1246,11 +1246,13 @@ with tab5:
 
     realized_pnl = safe_float(closed_df["realized_pnl"].sum()) if not closed_df.empty else 0.0
     unrealized_pnl = 0.0
+    invested_cost = 0.0
     open_pos_dict: Dict[str, dict] = {}
 
     if not open_df.empty:
         for _, r in open_df.iterrows():
             ltp = latest_prices.get(r["ticker"], float(r["entry_price"]))
+            invested_cost += float(r["entry_price"]) * float(r["qty"])
             unrealized_pnl += (ltp - float(r["entry_price"])) * float(r["qty"])
             open_pos_dict[r["ticker"]] = {
                 "entry": float(r["entry_price"]),
@@ -1267,11 +1269,19 @@ with tab5:
     port_heat_pct = compute_portfolio_heat(open_pos_dict, virtual_equity) * 100.0
     sector_exp = compute_sector_exposure(open_pos_dict, virtual_equity, latest_prices)
 
+    free_cash = float(capital) + realized_pnl - invested_cost
+    holdings_val = invested_cost + unrealized_pnl
+    cash_pct = (free_cash / virtual_equity * 100.0) if virtual_equity > 0 else 0.0
+
     p1, p2, p3, p4 = st.columns(4)
-    p1.metric("Virtual Portfolio Equity", f"{curr}{virtual_equity:,.2f}", f"{curr}{(realized_pnl + unrealized_pnl):+,.2f}")
+    p1.metric("Total Equity (Stocks + Cash)", f"{curr}{virtual_equity:,.2f}", f"{curr}{(realized_pnl + unrealized_pnl):+,.2f}")
     p2.metric("Portfolio Heat (Max 5%)", f"{port_heat_pct:.2f}%")
     p3.metric("Open Positions", f"{len(open_df)}")
     p4.metric("25% Kill-Switch", "HALTED" if kill_switch_hit else "ACTIVE · SAFE")
+
+    c_inv, c_cash = st.columns(2)
+    c_inv.metric("Invested in Stocks (Current Value)", f"{curr}{holdings_val:,.2f}", f"Cost: {curr}{invested_cost:,.2f}")
+    c_cash.metric("Free Cash Available", f"{curr}{free_cash:,.2f}", f"{cash_pct:.1f}% liquid")
 
     # Live Risk Gauges
     g1, g2 = st.columns(2)
