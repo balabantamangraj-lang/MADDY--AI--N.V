@@ -110,6 +110,15 @@ def jump_to_chart(ticker: str) -> None:
     st.rerun()
 
 
+def _get_admin_pin() -> str:
+    try:
+        if "ADMIN_PIN" in st.secrets:
+            return str(st.secrets["ADMIN_PIN"]).strip()
+    except Exception:
+        pass
+    return os.environ.get("ADMIN_PIN", "").strip()
+
+
 def style_tradingview(fig: go.Figure, height: int = 440, right_axis: bool = True, show_crosshair: bool = True) -> go.Figure:
     """Apply consistent TradingView Pro Dark styling (#131722 canvas, crisp grids, right price axis)."""
     fig.update_layout(
@@ -285,8 +294,18 @@ if "cloud_journal_checked" not in st.session_state:
 # ============================================================================
 # Collapsible Sidebar Controls
 # ============================================================================
+_admin_pin_secret = _get_admin_pin()
+is_admin = not bool(_admin_pin_secret)
+
 with st.sidebar:
     st.header("Maddy AI Controls")
+    if _admin_pin_secret:
+        _entered_pin = st.text_input("🔒 Admin PIN (Unlock Trade/Alerts)", type="password", key="admin_pin_input")
+        if _entered_pin.strip() == _admin_pin_secret:
+            is_admin = True
+            st.success("🔓 Admin Unlocked")
+        else:
+            st.caption("👀 View-Only Demo Mode (Buy/Close/Telegram locked)")
     if st.button("Refresh Live Data Now", width="stretch"):
         st.cache_data.clear()
         st.rerun()
@@ -611,7 +630,7 @@ with tab1:
                         st.caption(f"Max Risk: {curr}{max_risk_amt:,.0f} · Est. Reward: {curr}{est_reward_amt:,.0f}")
 
                         b1, b2, b3 = st.columns(3)
-                        if b1.button("Paper Buy", key=f"pb_{row['Ticker']}", width="stretch"):
+                        if b1.button("Paper Buy", key=f"pb_{row['Ticker']}", width="stretch", disabled=not is_admin):
                             if qty > 0:
                                 st.session_state["_confirm_pb_ticker"] = str(row["Ticker"])
                         if st.session_state.get("_confirm_pb_ticker") == str(row["Ticker"]):
@@ -642,7 +661,7 @@ with tab1:
                             if cb2.button("❌ Cancel", key=f"pb_no_{row['Ticker']}", width="stretch"):
                                 st.session_state.pop("_confirm_pb_ticker", None)
                                 st.rerun()
-                        if b2.button("Telegram", key=f"tg_{row['Ticker']}", width="stretch"):
+                        if b2.button("Telegram", key=f"tg_{row['Ticker']}", width="stretch", disabled=not is_admin):
                             msg = format_signal_message(row.to_dict(), qty)
                             ok, info = send_telegram_alert(msg)
                             if ok:
@@ -1240,7 +1259,7 @@ with tab4:
 # ----------------------------------------------------------------------------
 with tab5:
     paper_df = load_paper_trades()
-    if not paper_df.empty and not use_demo_mode:
+    if not paper_df.empty and not use_demo_mode and is_admin:
         updated_paper_df, gtt_events = check_and_apply_gtt_exits(paper_df, stock_data)
         if gtt_events:
             restore_paper_trades_from_df(updated_paper_df)
@@ -1388,7 +1407,7 @@ with tab5:
             )
             if c_ch.button("📉 Chart", key=f"p5_ch_{r['id']}", width="stretch"):
                 jump_to_chart(str(r["ticker"]))
-            if c_act.button("Close @ LTP", key=f"close_{r['id']}", width="stretch"):
+            if c_act.button("Close @ LTP", key=f"close_{r['id']}", width="stretch", disabled=not is_admin):
                 st.session_state["_confirm_close_id"] = int(r["id"])
             if st.session_state.get("_confirm_close_id") == int(r["id"]):
                 st.warning(f"Confirm Close **{r['ticker']}** @ {curr}{ltp:,.2f} (Est. P&L: {curr}{u_pnl:+,.2f})?")
@@ -1424,13 +1443,13 @@ with tab5:
         st.divider()
         st.markdown("**Permanent Cloud Journal (Survives Reboots)**")
         c_sync1, c_sync2 = st.columns(2)
-        if c_sync1.button("Save Journal to GitHub Cloud", width="stretch"):
+        if c_sync1.button("Save Journal to GitHub Cloud", width="stretch", disabled=not is_admin):
             ok_s, msg_s = push_journal_to_github(paper_df)
             if ok_s:
                 st.success(msg_s)
             else:
                 st.info(msg_s)
-        if c_sync2.button("Restore from GitHub Cloud", width="stretch"):
+        if c_sync2.button("Restore from GitHub Cloud", width="stretch", disabled=not is_admin):
             cloud_df, msg_c = pull_journal_from_github()
             if cloud_df is not None:
                 n_rest = restore_paper_trades_from_df(cloud_df)
@@ -1439,7 +1458,7 @@ with tab5:
             else:
                 st.info(msg_c)
 
-        uploaded_csv = st.file_uploader("Or Restore from Saved CSV Backup", type=["csv"], key="restore_csv")
+        uploaded_csv = st.file_uploader("Or Restore from Saved CSV Backup", type=["csv"], key="restore_csv", disabled=not is_admin)
         if uploaded_csv is not None:
             try:
                 imp_df = pd.read_csv(uploaded_csv)
@@ -1449,7 +1468,7 @@ with tab5:
             except Exception as exc:
                 st.error(f"Could not read CSV: {exc}")
 
-        if st.button("Reset Paper Portfolio"):
+        if st.button("Reset Paper Portfolio", disabled=not is_admin):
             st.session_state["_confirm_reset_db"] = True
         if st.session_state.get("_confirm_reset_db"):
             st.error("Confirm Reset ALL Paper Trades? Isse saara local paper history clear ho jayega!")
